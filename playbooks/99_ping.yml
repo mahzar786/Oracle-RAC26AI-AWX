@@ -1,3 +1,4 @@
+---
 - name: Verify connectivity to RAC nodes
   hosts: all
   gather_facts: false
@@ -7,10 +8,10 @@
     - name: Ping hosts
       ansible.builtin.ping:
 
-    - name: Show hostname
+    - name: Get hostname
       ansible.builtin.command: hostname
       register: host
 
     - name: Display hostname
       ansible.builtin.debug:
-        var: host.stdou
+        msg: "Connected to {{ host.stdout }}"
