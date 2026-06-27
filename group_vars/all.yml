@@ -1,0 +1,30 @@
+---
+cluster_name: RACSCL
+scan_name: racs-scan
+scan_ip: 192.168.56.90
+
+node1_name: racs1
+node2_name: racs2
+node1_public_ip: 192.168.56.80
+node2_public_ip: 192.168.56.81
+node1_vip: 192.168.56.82
+node2_vip: 192.168.56.83
+
+grid_user: grid
+oracle_user: oracle
+oracle_base: /u01/app/oracle
+grid_base: /u01/app/grid
+grid_home: /u01/app/26ai/grid
+oracle_home: /u01/app/oracle/product/26ai/dbhome_1
+ora_inventory: /u01/app/oraInventory
+stage_dir: /stage/26ai
+
+grid_zip: LINUX.X64_2626000_grid_home.zip
+db_zip: LINUX.X64_2626000_db_home.zip
+
+ocr_disks:
+  - /dev/disk/by-id/ata-VBOX_HARDDISK_VBddaa40bb-7a1b3dc7
+data_disks:
+  - /dev/disk/by-id/ata-VBOX_HARDDISK_VB73715a8d-a73c68c9
+fra_disks:
+  - /dev/disk/by-id/ata-VBOX_HARDDISK_VB1c21c696-703123cf
