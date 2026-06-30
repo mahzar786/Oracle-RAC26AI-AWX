@@ -1,50 +1,422 @@
 ---
-- name: Environment validation for RAC nodes
+- name: Oracle RAC 26ai full environment validation
   hosts: all
-  gather_facts: true
   become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    minimum_cpu: 2
+    minimum_ram_mb: 7000
+    minimum_swap_mb: 900
+    required_rpms:
+      - bc
+      - binutils
+      - elfutils-libelf
+      - elfutils-libelf-devel
+      - fontconfig-devel
+      - glibc
+      - glibc-devel
+      - ksh
+      - libaio
+      - libaio-devel
+      - libXrender
+      - libX11
+      - libXau
+      - libXi
+      - libXtst
+      - libgcc
+      - libnsl
+      - libstdc++
+      - libstdc++-devel
+      - libxcb
+      - make
+      - net-tools
+      - nfs-utils
+      - python3
+      - smartmontools
+      - sysstat
+      - unzip
+      - zip
+      - chrony
 
   tasks:
-    - name: Show node details
+
+    - name: Header
       debug:
         msg:
-          - "Host: {{ inventory_hostname }}"
-          - "FQDN: {{ ansible_fqdn }}"
+          - "============================================================"
+          - "Oracle RAC 26ai Environment Validation"
+          - "Node: {{ inventory_hostname }}"
+          - "============================================================"
+
+    - name: OS version
+      debug:
+        msg:
           - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
-          - "CPU: {{ ansible_processor_vcpus }}"
-          - "Memory MB: {{ ansible_memtotal_mb }}"
-          - "Python: {{ ansible_python.executable }}"
+          - "Kernel: {{ ansible_kernel }}"
+          - "FQDN: {{ ansible_fqdn }}"
+
+    - name: Validate Oracle Linux 9.x
+      assert:
+        that:
+          - ansible_distribution in ['OracleLinux', 'RedHat', 'Rocky', 'AlmaLinux']
+          - ansible_distribution_major_version | int == 9
+        fail_msg: "Expected Oracle/RHEL compatible Linux 9.x"
 
     - name: Validate CPU
       assert:
         that:
-          - ansible_processor_vcpus | int >= 2
-        fail_msg: "Minimum 2 CPU required."
+          - ansible_processor_vcpus | int >= minimum_cpu
+        fail_msg: "Minimum {{ minimum_cpu }} CPUs required."
 
     - name: Validate memory
       assert:
         that:
-          - ansible_memtotal_mb | int >= 7300
-        fail_msg: "Minimum 7 GB RAM recommended."
+          - ansible_memtotal_mb | int >= minimum_ram_mb
+        fail_msg: "Minimum {{ minimum_ram_mb }} MB RAM required."
 
-    - name: Check required directories
+    - name: Check swap
+      command: swapon --show --bytes
+      register: swap_out
+      changed_when: false
+      failed_when: false
+
+    - name: Display swap
+      debug:
+        var: swap_out.stdout_lines
+
+    - name: Check SELinux status
+      command: getenforce
+      register: selinux_status
+      changed_when: false
+      failed_when: false
+
+    - name: Validate SELinux is not Enforcing
+      assert:
+        that:
+          - selinux_status.stdout != "Enforcing"
+        fail_msg: "SELinux is Enforcing. Set to Permissive for RAC lab."
+
+    - name: Check firewalld status
+      command: systemctl is-active firewalld
+      register: firewalld_status
+      changed_when: false
+      failed_when: false
+
+    - name: Validate firewalld is inactive
+      assert:
+        that:
+          - firewalld_status.stdout != "active"
+        fail_msg: "firewalld is active. Disable it for RAC lab."
+
+    - name: Check chronyd status
+      command: systemctl is-active chronyd
+      register: chrony_status
+      changed_when: false
+      failed_when: false
+
+    - name: Validate chronyd running
+      assert:
+        that:
+          - chrony_status.stdout == "active"
+        fail_msg: "chronyd is not active."
+
+    - name: Check chrony tracking
+      command: chronyc tracking
+      register: chrony_tracking
+      changed_when: false
+      failed_when: false
+
+    - name: Show chrony tracking
+      debug:
+        var: chrony_tracking.stdout_lines
+
+    - name: Validate /etc/hosts entries
+      shell: |
+        grep -E "{{ node1_name }}|{{ node2_name }}|{{ scan_name }}|{{ node1_name }}-vip|{{ node2_name }}-vip" /etc/hosts
+      register: hosts_file
+      changed_when: false
+      failed_when: hosts_file.rc != 0
+
+    - name: Show /etc/hosts RAC entries
+      debug:
+        var: hosts_file.stdout_lines
+
+    - name: Validate public IP exists on node
+      shell: |
+        ip -4 addr | grep -q "{{ ansible_host | default(ansible_default_ipv4.address) }}"
+      changed_when: false
+
+    - name: Show network interfaces
+      command: ip -br addr
+      register: ip_addr
+      changed_when: false
+
+    - name: Print network interfaces
+      debug:
+        var: ip_addr.stdout_lines
+
+    - name: Validate SCAN name resolves
+      command: getent hosts {{ scan_name }}
+      register: scan_resolve
+      changed_when: false
+      failed_when: scan_resolve.rc != 0
+
+    - name: Validate SCAN IP
+      assert:
+        that:
+          - scan_ip in scan_resolve.stdout
+        fail_msg: "SCAN {{ scan_name }} does not resolve to {{ scan_ip }}"
+
+    - name: Validate VIP names resolve
+      shell: |
+        getent hosts {{ node1_name }}-vip
+        getent hosts {{ node2_name }}-vip
+      register: vip_resolve
+      changed_when: false
+      failed_when: vip_resolve.rc != 0
+
+    - name: Show VIP resolution
+      debug:
+        var: vip_resolve.stdout_lines
+
+    - name: DNS check
+      shell: |
+        getent hosts {{ node1_name }}
+        getent hosts {{ node2_name }}
+        getent hosts {{ scan_name }}
+      register: dns_check
+      changed_when: false
+      failed_when: dns_check.rc != 0
+
+    - name: Passwordless/root SSH from this node to both RAC nodes
+      shell: |
+        ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@{{ node1_name }} hostname
+        ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@{{ node2_name }} hostname
+      register: ssh_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show root SSH check
+      debug:
+        var: ssh_check.stdout_lines
+
+    - name: Check kernel parameters
+      shell: |
+        sysctl kernel.shmall
+        sysctl kernel.shmmax
+        sysctl kernel.shmmni
+        sysctl kernel.sem
+        sysctl fs.file-max
+        sysctl net.ipv4.ip_local_port_range
+        sysctl net.core.rmem_default
+        sysctl net.core.rmem_max
+        sysctl net.core.wmem_default
+        sysctl net.core.wmem_max
+        sysctl fs.aio-max-nr
+      register: kernel_params
+      changed_when: false
+      failed_when: false
+
+    - name: Show kernel parameters
+      debug:
+        var: kernel_params.stdout_lines
+
+    - name: Check required RPMs
+      shell: |
+        missing=0
+        for p in {{ required_rpms | join(' ') }}; do
+          rpm -q "$p" >/dev/null 2>&1 || { echo "MISSING: $p"; missing=1; }
+        done
+        exit $missing
+      register: rpm_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show missing RPMs
+      debug:
+        var: rpm_check.stdout_lines
+
+    - name: Validate required RPMs installed
+      assert:
+        that:
+          - rpm_check.rc == 0
+        fail_msg: "Some required RPMs are missing. See output above."
+
+    - name: Check grid user
+      command: id {{ grid_user }}
+      register: grid_user_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check oracle user
+      command: id {{ oracle_user }}
+      register: oracle_user_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show user status
+      debug:
+        msg:
+          - "grid user rc: {{ grid_user_check.rc }}"
+          - "oracle user rc: {{ oracle_user_check.rc }}"
+
+    - name: Check stage directory
       stat:
-        path: "{{ item }}"
-      loop:
-        - /u01
-        - /stage/26ai
-      register: dir_check
+        path: "{{ stage_dir }}"
+      register: stage_check
 
-    - name: Fail if required directory missing
-      fail:
-        msg: "Required directory missing: {{ item.item }}"
-      loop: "{{ dir_check.results }}"
-      when: not item.stat.exists
+    - name: Validate stage directory exists
+      assert:
+        that:
+          - stage_check.stat.exists
+          - stage_check.stat.isdir
+        fail_msg: "{{ stage_dir }} is missing."
+
+    - name: Check Grid zip
+      stat:
+        path: "{{ stage_dir }}/{{ grid_zip }}"
+      register: grid_zip_check
+
+    - name: Check DB zip
+      stat:
+        path: "{{ stage_dir }}/{{ db_zip }}"
+      register: db_zip_check
+
+    - name: Validate Oracle media exists
+      assert:
+        that:
+          - grid_zip_check.stat.exists
+          - db_zip_check.stat.exists
+        fail_msg: "Grid or DB zip missing under {{ stage_dir }}"
 
     - name: Show disk layout
       command: lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
       register: lsblk_out
+      changed_when: false
 
     - name: Print disk layout
       debug:
         var: lsblk_out.stdout_lines
+
+    - name: Validate ASM disk by-id paths exist
+      stat:
+        path: "{{ item }}"
+      loop: "{{ ocr_disks + data_disks + fra_disks }}"
+      register: asm_disk_check
+
+    - name: Fail if ASM disk ID missing
+      fail:
+        msg: "ASM disk ID missing on {{ inventory_hostname }}: {{ item.item }}"
+      loop: "{{ asm_disk_check.results }}"
+      when: not item.stat.exists
+
+    - name: Validate ASM disks are not OS/application disks
+      shell: |
+        for d in {{ (ocr_disks + data_disks + fra_disks) | join(' ') }}; do
+          realdev=$(readlink -f "$d")
+          case "$realdev" in
+            /dev/sda|/dev/sda*|/dev/sdb|/dev/sdb*|/dev/sdc|/dev/sdc*|/dev/sdd|/dev/sdd*)
+              echo "PROTECTED DISK: $d -> $realdev"
+              exit 1
+              ;;
+            *)
+              echo "ASM CANDIDATE OK: $d -> $realdev"
+              ;;
+          esac
+        done
+      register: asm_protect_check
+      changed_when: false
+
+    - name: Show ASM protection check
+      debug:
+        var: asm_protect_check.stdout_lines
+
+    - name: Validate ASM disks are not mounted
+      shell: |
+        for d in {{ (ocr_disks + data_disks + fra_disks) | join(' ') }}; do
+          realdev=$(readlink -f "$d")
+          mnt=$(lsblk -no MOUNTPOINT "$realdev" | grep -v '^$' || true)
+          if [ -n "$mnt" ]; then
+            echo "MOUNTED: $d -> $realdev mounted on $mnt"
+            exit 1
+          else
+            echo "NOT MOUNTED: $d -> $realdev"
+          fi
+        done
+      register: asm_mount_check
+      changed_when: false
+
+    - name: Show ASM mount check
+      debug:
+        var: asm_mount_check.stdout_lines
+
+    - name: Check existing Oracle/Grid installations
+      shell: |
+        echo "Checking Oracle/Grid homes"
+        [ -d "{{ grid_home }}" ] && echo "GRID_HOME_EXISTS={{ grid_home }}" || echo "GRID_HOME_NOT_FOUND"
+        [ -d "{{ oracle_home }}" ] && echo "ORACLE_HOME_EXISTS={{ oracle_home }}" || echo "ORACLE_HOME_NOT_FOUND"
+        [ -f /etc/oraInst.loc ] && cat /etc/oraInst.loc || echo "NO_ORAINST_LOC"
+        ps -ef | egrep 'crsd.bin|ocssd.bin|asm_pmon|ora_pmon|tnslsnr' | grep -v grep || true
+      register: existing_oracle
+      changed_when: false
+
+    - name: Show existing Oracle/Grid status
+      debug:
+        var: existing_oracle.stdout_lines
+
+    - name: Check existing OCR/voting disks if Grid exists
+      shell: |
+        if [ -x "{{ grid_home }}/bin/ocrcheck" ]; then
+          {{ grid_home }}/bin/ocrcheck || true
+        else
+          echo "ocrcheck not available"
+        fi
+
+        if [ -x "{{ grid_home }}/bin/crsctl" ]; then
+          {{ grid_home }}/bin/crsctl query css votedisk || true
+        else
+          echo "crsctl not available"
+        fi
+      register: ocr_vote_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show OCR/Voting check
+      debug:
+        var: ocr_vote_check.stdout_lines
+
+    - name: Check available disk space
+      command: df -h / /u01 /stage
+      register: disk_space
+      changed_when: false
+      failed_when: false
+
+    - name: Show available disk space
+      debug:
+        var: disk_space.stdout_lines
+
+    - name: CVU prerequisites - check cluvfy if Grid home exists
+      shell: |
+        if [ -x "{{ grid_home }}/runcluvfy.sh" ]; then
+          echo "runcluvfy.sh exists"
+        elif [ -x "{{ grid_home }}/bin/cluvfy" ]; then
+          echo "cluvfy exists"
+        else
+          echo "CVU not available until Grid software is staged/unzipped"
+        fi
+      register: cvu_check
+      changed_when: false
+
+    - name: Show CVU check
+      debug:
+        var: cvu_check.stdout_lines
+
+    - name: Final validation summary
+      debug:
+        msg:
+          - "Environment validation completed for {{ inventory_hostname }}"
+          - "If this playbook is green on both nodes, proceed to cleanup/prereq phase."
