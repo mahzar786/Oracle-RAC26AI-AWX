@@ -1,2 +1,50 @@
 ---
-# Placeholder for 00_environment_validation.yml
+- name: Environment validation for RAC nodes
+  hosts: all
+  gather_facts: true
+  become: true
+
+  tasks:
+    - name: Show node details
+      debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "FQDN: {{ ansible_fqdn }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "CPU: {{ ansible_processor_vcpus }}"
+          - "Memory MB: {{ ansible_memtotal_mb }}"
+          - "Python: {{ ansible_python.executable }}"
+
+    - name: Validate CPU
+      assert:
+        that:
+          - ansible_processor_vcpus | int >= 2
+        fail_msg: "Minimum 2 CPU required."
+
+    - name: Validate memory
+      assert:
+        that:
+          - ansible_memtotal_mb | int >= 11000
+        fail_msg: "Minimum 12GB RAM recommended."
+
+    - name: Check required directories
+      stat:
+        path: "{{ item }}"
+      loop:
+        - /u01
+        - /stage/26ai
+      register: dir_check
+
+    - name: Fail if required directory missing
+      fail:
+        msg: "Required directory missing: {{ item.item }}"
+      loop: "{{ dir_check.results }}"
+      when: not item.stat.exists
+
+    - name: Show disk layout
+      command: lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
+      register: lsblk_out
+
+    - name: Print disk layout
+      debug:
+        var: lsblk_out.stdout_lines
