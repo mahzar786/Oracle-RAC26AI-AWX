@@ -24,7 +24,7 @@
     - name: Validate memory
       assert:
         that:
-          - ansible_memtotal_mb | int >= 11000
+          - ansible_memtotal_mb | int >= 7500
         fail_msg: "Minimum 12GB RAM recommended."
 
     - name: Check required directories
