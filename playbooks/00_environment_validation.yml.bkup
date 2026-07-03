@@ -320,43 +320,19 @@
       loop: "{{ asm_disk_check.results }}"
       when: not item.stat.exists
 
-    - name: Validate ASM disks are safe candidates
+    - name: Validate ASM disks are not OS/application disks
       shell: |
         for d in {{ (ocr_disks + data_disks + fra_disks) | join(' ') }}; do
           realdev=$(readlink -f "$d")
-          echo "Checking $d -> $realdev"
-
-          if [ ! -b "$realdev" ]; then
-            echo "FAILED: $realdev is not a block device"
-            exit 1
-          fi
-
-          # Do not allow root disk
-          root_disk=$(findmnt -no SOURCE / | sed 's/[0-9]*$//' | sed 's/p$//')
-          if [ "$realdev" = "$root_disk" ]; then
-            echo "FAILED: $realdev is root disk"
-            exit 1
-          fi
-
-          # Fail if disk itself is mounted
-          mnt=$(lsblk -no MOUNTPOINT "$realdev" | grep -v '^$' || true)
-          if [ -n "$mnt" ]; then
-            echo "FAILED: $realdev is mounted on $mnt"
-            exit 1
-          fi
-
-          # Fail if any child partition is mounted
-          children=$(lsblk -nr -o NAME "$realdev" | tail -n +2 || true)
-          for c in $children; do
-            child="/dev/$c"
-            child_mnt=$(lsblk -no MOUNTPOINT "$child" | grep -v '^$' || true)
-            if [ -n "$child_mnt" ]; then
-              echo "FAILED: $child is mounted on $child_mnt"
+          case "$realdev" in
+            /dev/sda|/dev/sda*|/dev/sdb|/dev/sdb*|/dev/sdc|/dev/sdc*|/dev/sdd|/dev/sdd*)
+              echo "PROTECTED DISK: $d -> $realdev"
               exit 1
-            fi
-          done
-
-          echo "OK ASM CANDIDATE: $d -> $realdev"
+              ;;
+            *)
+              echo "ASM CANDIDATE OK: $d -> $realdev"
+              ;;
+          esac
         done
       register: asm_protect_check
       changed_when: false
@@ -364,6 +340,25 @@
     - name: Show ASM protection check
       debug:
         var: asm_protect_check.stdout_lines
+
+    - name: Validate ASM disks are not mounted
+      shell: |
+        for d in {{ (ocr_disks + data_disks + fra_disks) | join(' ') }}; do
+          realdev=$(readlink -f "$d")
+          mnt=$(lsblk -no MOUNTPOINT "$realdev" | grep -v '^$' || true)
+          if [ -n "$mnt" ]; then
+            echo "MOUNTED: $d -> $realdev mounted on $mnt"
+            exit 1
+          else
+            echo "NOT MOUNTED: $d -> $realdev"
+          fi
+        done
+      register: asm_mount_check
+      changed_when: false
+
+    - name: Show ASM mount check
+      debug:
+        var: asm_mount_check.stdout_lines
 
     - name: Check existing Oracle/Grid installations
       shell: |
@@ -374,8 +369,6 @@
         ps -ef | egrep 'crsd.bin|ocssd.bin|asm_pmon|ora_pmon|tnslsnr' | grep -v grep || true
       register: existing_oracle
       changed_when: false
-
-
 
     - name: Show existing Oracle/Grid status
       debug:
