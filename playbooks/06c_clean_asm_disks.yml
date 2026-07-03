@@ -1,2 +1,139 @@
 ---
-# Placeholder for 06c_clean_asm_disks.yml
+- name: Safely clean Oracle ASM candidate disks
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    asm_all_disks: "{{ ocr_disks + data_disks + fra_disks }}"
+    report_dir: /var/log/oracle_rac26ai/asm_cleanup
+
+  tasks:
+
+    - name: Create ASM cleanup report directory
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Display ASM disks selected for cleanup
+      debug:
+        msg:
+          - "Node: {{ inventory_hostname }}"
+          - "ASM disks to clean:"
+          - "{{ asm_all_disks }}"
+
+    - name: Validate and clean ASM candidate disks
+      shell: |
+        set -e
+
+        DISK_ID="{{ item }}"
+        REALDEV=$(readlink -f "$DISK_ID")
+        TS=$(date +%Y%m%d_%H%M%S)
+        LOGDIR="{{ report_dir }}"
+        LOGFILE="$LOGDIR/asm_cleanup_$(hostname)_$(basename $REALDEV)_$TS.log"
+
+        echo "===================================================" | tee -a "$LOGFILE"
+        echo "ASM CLEANUP START" | tee -a "$LOGFILE"
+        echo "Host     : $(hostname)" | tee -a "$LOGFILE"
+        echo "Disk ID  : $DISK_ID" | tee -a "$LOGFILE"
+        echo "Real Dev : $REALDEV" | tee -a "$LOGFILE"
+        echo "Date     : $(date)" | tee -a "$LOGFILE"
+        echo "===================================================" | tee -a "$LOGFILE"
+
+        if [ ! -b "$REALDEV" ]; then
+          echo "FAILED: $REALDEV is not a block device" | tee -a "$LOGFILE"
+          exit 1
+        fi
+
+        ROOT_SRC=$(findmnt -no SOURCE /)
+        ROOT_DISK="/dev/$(lsblk -no PKNAME "$ROOT_SRC" 2>/dev/null || basename "$ROOT_SRC" | sed 's/[0-9]*$//')"
+
+        if [ "$REALDEV" = "$ROOT_DISK" ]; then
+          echo "FAILED: $REALDEV is root disk" | tee -a "$LOGFILE"
+          exit 1
+        fi
+
+        if lsblk -no MOUNTPOINT "$REALDEV" | grep -q '/'; then
+          echo "FAILED: $REALDEV is mounted" | tee -a "$LOGFILE"
+          lsblk "$REALDEV" | tee -a "$LOGFILE"
+          exit 1
+        fi
+
+        CHILDREN=$(lsblk -nr -o NAME "$REALDEV" | tail -n +2 || true)
+        for C in $CHILDREN; do
+          CHILD="/dev/$C"
+          if lsblk -no MOUNTPOINT "$CHILD" | grep -q '/'; then
+            echo "FAILED: child partition $CHILD is mounted" | tee -a "$LOGFILE"
+            lsblk "$REALDEV" | tee -a "$LOGFILE"
+            exit 1
+          fi
+        done
+
+        echo "Before cleanup - lsblk:" | tee -a "$LOGFILE"
+        lsblk -f "$REALDEV" | tee -a "$LOGFILE" || true
+
+        echo "Before cleanup - blkid:" | tee -a "$LOGFILE"
+        blkid "$REALDEV" || true | tee -a "$LOGFILE"
+
+        echo "Before cleanup - wipefs signatures:" | tee -a "$LOGFILE"
+        wipefs -n "$REALDEV" | tee -a "$LOGFILE" || true
+
+        echo "Cleaning signatures on $REALDEV" | tee -a "$LOGFILE"
+
+        wipefs -a "$REALDEV" || true
+        sgdisk --zap-all "$REALDEV" || true
+
+        dd if=/dev/zero of="$REALDEV" bs=1M count=20 conv=fsync status=none || true
+
+        SECTORS=$(blockdev --getsz "$REALDEV")
+        if [ "$SECTORS" -gt 40960 ]; then
+          dd if=/dev/zero of="$REALDEV" bs=512 seek=$((SECTORS-40960)) count=40960 conv=fsync status=none || true
+        fi
+
+        partprobe "$REALDEV" || true
+        udevadm settle || true
+        sleep 2
+
+        echo "After cleanup - lsblk:" | tee -a "$LOGFILE"
+        lsblk -f "$REALDEV" | tee -a "$LOGFILE" || true
+
+        echo "After cleanup - wipefs:" | tee -a "$LOGFILE"
+        wipefs -n "$REALDEV" | tee -a "$LOGFILE" || true
+
+        echo "ASM CLEANUP COMPLETED: $DISK_ID -> $REALDEV" | tee -a "$LOGFILE"
+      loop: "{{ asm_all_disks }}"
+      register: asm_cleanup_result
+      changed_when: true
+
+    - name: Show ASM cleanup result
+      debug:
+        var: asm_cleanup_result.results | map(attribute='stdout_lines') | list
+
+    - name: Final ASM cleanup verification
+      shell: |
+        for d in {{ asm_all_disks | join(' ') }}; do
+          realdev=$(readlink -f "$d")
+          echo "======================================"
+          echo "$d -> $realdev"
+          lsblk -f "$realdev"
+          echo "--- wipefs ---"
+          wipefs -n "$realdev" || true
+        done
+      register: asm_verify
+      changed_when: false
+
+    - name: Print final ASM cleanup verification
+      debug:
+        var: asm_verify.stdout_lines
+
+    - name: ASM cleanup completed
+      debug:
+        msg:
+          - "ASM cleanup completed on {{ inventory_hostname }}"
+          - "Next step: run 06d_create_asm_udev.yml"
