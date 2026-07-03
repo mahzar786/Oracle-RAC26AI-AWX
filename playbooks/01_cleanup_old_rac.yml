@@ -60,6 +60,82 @@
       changed_when: false
       failed_when: false
 
+    - name: Kill remaining Grid/Oracle installer and Java processes
+      shell: |
+        pkill -9 -f "{{ grid_home }}" || true
+        pkill -9 -f "{{ oracle_home }}" || true
+        pkill -9 -f "gridSetup.sh" || true
+        pkill -9 -f "runInstaller" || true
+        pkill -9 -f "cluvfy" || true
+        pkill -9 -f "oracle.install" || true
+        pkill -9 -f "OraInstall" || true
+      changed_when: false
+      failed_when: false
+
+    - name: Clean old Oracle install logs and temp files
+      shell: |
+        rm -rf /tmp/CVU_* \
+               /tmp/OraInstall* \
+               /tmp/GridSetupActions* \
+               /tmp/InstallActions* \
+               /tmp/cvutrace_* \
+               /tmp/hsperfdata_grid \
+               /tmp/hsperfdata_oracle \
+               /tmp/hsperfdata_root \
+               /tmp/.oracle \
+               /var/tmp/.oracle
+
+        find /tmp -maxdepth 1 -type f -mtime +1 -delete || true
+        find /var/tmp -maxdepth 1 -type f -mtime +1 -delete || true
+      changed_when: false
+      failed_when: false
+
+    - name: Clean package cache
+      shell: |
+        dnf clean all || true
+        rm -rf /var/cache/dnf/* /var/cache/yum/* || true
+      changed_when: false
+      failed_when: false
+
+    - name: Restart journald to release deleted journal files
+      systemd:
+        name: systemd-journald
+        state: restarted
+      failed_when: false
+
+    - name: Check deleted open files after cleanup
+      shell: |
+        lsof +L1 || true
+      register: deleted_files_check
+      changed_when: false
+
+    - name: Show deleted open files
+      debug:
+        var: deleted_files_check.stdout_lines
+
+    - name: Verify no Oracle/Grid processes remain
+      shell: |
+        ps -ef | egrep 'oracle|grid|asm|crsd|ohasd|tnslsnr|gridSetup|runInstaller|cluvfy|OraInstall' | grep -v grep || true
+      register: oracle_processes
+      changed_when: false
+
+    - name: Show remaining Oracle/Grid processes
+      debug:
+        var: oracle_processes.stdout_lines
+
+    - name: Show disk space after cleanup
+      shell: |
+        df -h
+        echo
+        du -xhd1 / 2>/dev/null | sort -h
+      register: disk_after_cleanup
+      changed_when: false
+
+    - name: Print disk space after cleanup
+      debug:
+        var: disk_after_cleanup.stdout_lines
+
+
     - name: Show remaining Oracle/Grid files
       shell: |
         echo "Node: $(hostname)"
