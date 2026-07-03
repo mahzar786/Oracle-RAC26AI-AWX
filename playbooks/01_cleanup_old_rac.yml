@@ -72,6 +72,26 @@
       changed_when: false
       failed_when: false
 
+    - name: Stop Oracle High Availability Services
+      shell: |
+        if [ -x /etc/init.d/init.ohasd ]; then
+        /etc/init.d/init.ohasd stop || true
+        fi
+
+        if [ -x /etc/oracle.ahf/bin/tfactl ]; then
+        /etc/oracle.ahf/bin/tfactl stop || true
+        fi
+
+        pkill -9 -f ohasd || true
+        pkill -9 -f cssd || true
+        pkill -9 -f evmd || true
+        pkill -9 -f gipcd || true
+        pkill -9 -f mdnsd || true
+        pkill -9 -f gpnpd || true
+         pkill -9 -f tfa || true
+      ignore_errors: yes
+      changed_when: false
+
     - name: Clean old Oracle install logs and temp files
       shell: |
         rm -rf /tmp/CVU_* \
