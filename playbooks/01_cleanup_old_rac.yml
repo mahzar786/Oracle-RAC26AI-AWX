@@ -1,2 +1,76 @@
 ---
-# Placeholder for 01_cleanup_old_rac.yml
+- name: Cleanup old Oracle RAC/Grid remnants
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Stop CRS if old Grid home exists
+      shell: |
+        if [ -x "{{ grid_home }}/bin/crsctl" ]; then
+          {{ grid_home }}/bin/crsctl stop crs -f || true
+        fi
+      changed_when: false
+      failed_when: false
+
+    - name: Kill old oracle/grid processes
+      shell: |
+        pkill -9 -u oracle || true
+        pkill -9 -u grid || true
+      changed_when: false
+      failed_when: false
+
+    - name: Remove old Grid and Oracle homes
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ grid_home }}"
+        - "{{ oracle_home }}"
+
+    - name: Remove old Oracle temp/socket files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/tmp/.oracle
+        - /tmp/.oracle
+        - /etc/oracle
+
+    - name: Remove old Oracle service files
+      shell: |
+        rm -f /etc/init.d/init.*
+        rm -f /etc/systemd/system/oracle*.service
+        rm -f /etc/systemd/system/ohasd.service
+        systemctl daemon-reload || true
+      changed_when: false
+      failed_when: false
+
+    - name: Remove old Oracle inventory pointer only
+      file:
+        path: /etc/oraInst.loc
+        state: absent
+
+    - name: Clean old installer temp files
+      shell: |
+        rm -rf /tmp/CVU_* /tmp/OraInstall* /tmp/GridSetupActions* /tmp/InstallActions*
+      changed_when: false
+      failed_when: false
+
+    - name: Show remaining Oracle/Grid files
+      shell: |
+        echo "Node: $(hostname)"
+        echo "Checking homes..."
+        [ -d "{{ grid_home }}" ] && echo "GRID_HOME_EXISTS" || echo "GRID_HOME_REMOVED"
+        [ -d "{{ oracle_home }}" ] && echo "ORACLE_HOME_EXISTS" || echo "ORACLE_HOME_REMOVED"
+        [ -f /etc/oraInst.loc ] && echo "ORAINST_EXISTS" || echo "ORAINST_REMOVED"
+        ps -ef | egrep 'crsd.bin|ocssd.bin|asm_pmon|ora_pmon|tnslsnr' | grep -v grep || echo "NO_ORACLE_PROCESSES"
+      register: cleanup_status
+      changed_when: false
+
+    - name: Print cleanup status
+      debug:
+        var: cleanup_status.stdout_lines
