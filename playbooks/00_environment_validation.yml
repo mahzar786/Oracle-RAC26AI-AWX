@@ -159,18 +159,23 @@
       debug:
         var: ip_addr.stdout_lines
 
-    - name: Validate SCAN name resolves
-      command: getent hosts {{ scan_name }}
+    - name: Validate SCAN resolves to three IPs
+      ansible.builtin.shell: "getent hosts {{ scan_name }}"
       register: scan_resolve
       changed_when: false
-      failed_when: scan_resolve.rc != 0
 
-     - name: Validate SCAN IPs
-       ansible.builtin.assert:
+    - name: Show SCAN resolution
+      ansible.builtin.debug:
+        var: scan_resolve.stdout_lines
+
+    - name: Verify SCAN IPs
+      ansible.builtin.assert:
         that:
-          - item in scan_resolve.stdout
-        fail_msg: "SCAN {{ scan_name }} does not resolve to expected IP {{ item }}"
-      loop: "{{ scan_ips }}"
+          - "'192.168.56.84' in scan_resolve.stdout"
+          - "'192.168.56.85' in scan_resolve.stdout"
+          - "'192.168.56.86' in scan_resolve.stdout"
+        fail_msg: "SCAN does not resolve to all three expected IPs."
+
 
     - name: Validate VIP names resolve
       shell: |
