@@ -22,8 +22,8 @@ oracle_home: /u01/app/oracle/product/26ai/dbhome_1
 ora_inventory: /u01/app/oraInventory
 stage_dir: /stage/26ai
 
-grid_zip: LINUX.X64_2626000_grid_home.zip
-db_zip: LINUX.X64_2626000_db_home.zip
+grid_zip: LINUX.X64_2326100_grid_home.zip
+db_zip: LINUX.X64_2326100_db_home.zip
 
 ocr_disks:
   - /dev/disk/by-id/ata-VBOX_HARDDISK_VBddaa40bb-7a1b3dc7
