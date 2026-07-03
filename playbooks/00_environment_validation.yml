@@ -165,12 +165,13 @@
       changed_when: false
       failed_when: scan_resolve.rc != 0
 
-    - name: Validate SCAN IP
+    - name: Validate SCAN IPs
       assert:
-        that:
-          - scan_ip in scan_resolve.stdout
-        fail_msg: "SCAN {{ scan_name }} does not resolve to {{ scan_ip }}"
-
+      that:
+        - item in scan_resolve.stdout
+      fail_msg: "SCAN {{ scan_name }} does not resolve to expected IP {{ item }}"
+      loop: "{{ scan_ips }}"
+   
     - name: Validate VIP names resolve
       shell: |
         getent hosts {{ node1_name }}-vip
