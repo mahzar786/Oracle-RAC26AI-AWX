@@ -1,2 +1,118 @@
 ---
-# Placeholder for 07_stage_software.yml
+- name: Stage Oracle Grid and Database software
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Validate stage directory exists
+      stat:
+        path: "{{ stage_dir }}"
+      register: stage_dir_check
+
+    - name: Fail if stage directory missing
+      fail:
+        msg: "{{ stage_dir }} does not exist."
+      when: not stage_dir_check.stat.exists
+
+    - name: Validate Grid zip exists
+      stat:
+        path: "{{ stage_dir }}/{{ grid_zip }}"
+      register: grid_zip_check
+
+    - name: Validate DB zip exists
+      stat:
+        path: "{{ stage_dir }}/{{ db_zip }}"
+      register: db_zip_check
+
+    - name: Fail if Oracle media missing
+      fail:
+        msg: "Missing Grid or DB zip under {{ stage_dir }}"
+      when: not grid_zip_check.stat.exists or not db_zip_check.stat.exists
+
+    - name: Create Grid and Oracle home directories
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: oinstall
+        mode: '0775'
+      loop:
+        - { path: "{{ grid_home }}", owner: "{{ grid_user }}" }
+        - { path: "{{ oracle_home }}", owner: "{{ oracle_user }}" }
+
+    - name: Unzip Grid software into Grid Home
+      unarchive:
+        src: "{{ stage_dir }}/{{ grid_zip }}"
+        dest: "{{ grid_home }}"
+        remote_src: true
+        owner: "{{ grid_user }}"
+        group: oinstall
+        creates: "{{ grid_home }}/gridSetup.sh"
+
+    - name: Unzip Database software into Oracle Home
+      unarchive:
+        src: "{{ stage_dir }}/{{ db_zip }}"
+        dest: "{{ oracle_home }}"
+        remote_src: true
+        owner: "{{ oracle_user }}"
+        group: oinstall
+        creates: "{{ oracle_home }}/runInstaller"
+
+    - name: Set ownership on Grid Home
+      file:
+        path: "{{ grid_home }}"
+        owner: "{{ grid_user }}"
+        group: oinstall
+        recurse: true
+
+    - name: Set ownership on Oracle Home
+      file:
+        path: "{{ oracle_home }}"
+        owner: "{{ oracle_user }}"
+        group: oinstall
+        recurse: true
+
+    - name: Validate Grid installer exists
+      stat:
+        path: "{{ grid_home }}/gridSetup.sh"
+      register: gridsetup_check
+
+    - name: Validate DB installer exists
+      stat:
+        path: "{{ oracle_home }}/runInstaller"
+      register: dbinstaller_check
+
+    - name: Fail if installers missing
+      fail:
+        msg: "Grid or DB installer missing after unzip."
+      when: not gridsetup_check.stat.exists or not dbinstaller_check.stat.exists
+
+    - name: Make installers executable
+      file:
+        path: "{{ item }}"
+        mode: '0755'
+      loop:
+        - "{{ grid_home }}/gridSetup.sh"
+        - "{{ oracle_home }}/runInstaller"
+
+    - name: Check staged software status
+      shell: |
+        echo "Node: $(hostname)"
+        echo "GRID_HOME={{ grid_home }}"
+        ls -l {{ grid_home }}/gridSetup.sh
+        echo
+        echo "ORACLE_HOME={{ oracle_home }}"
+        ls -l {{ oracle_home }}/runInstaller
+        echo
+        echo "Grid CVU:"
+        ls -l {{ grid_home }}/runcluvfy.sh 2>/dev/null || true
+      register: stage_status
+      changed_when: false
+
+    - name: Print staged software status
+      debug:
+        var: stage_status.stdout_lines
