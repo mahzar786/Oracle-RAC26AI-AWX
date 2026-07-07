@@ -1,0 +1,58 @@
+---
+- name: Cleanup failed Oracle software staging
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Kill failed unzip/install processes
+      shell: |
+        pkill -9 -f unzip || true
+        pkill -9 -f gridSetup || true
+        pkill -9 -f runInstaller || true
+        pkill -9 -f oracle.install || true
+      changed_when: false
+      failed_when: false
+
+    - name: Remove failed Grid/DB homes
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ grid_home }}"
+        - "{{ oracle_home }}"
+        - /app/26ai
+
+    - name: Recreate correct homes
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: oinstall
+        mode: '0775'
+      loop:
+        - { path: "{{ grid_home }}", owner: "{{ grid_user }}" }
+        - { path: "{{ oracle_home }}", owner: "{{ oracle_user }}" }
+
+    - name: Clean temporary staging files
+      shell: |
+        rm -rf /tmp/OraInstall* /tmp/GridSetupActions* /tmp/InstallActions* /tmp/CVU_* /tmp/cvutrace_*
+        dnf clean all || true
+        journalctl --vacuum-size=100M || true
+      changed_when: false
+      failed_when: false
+
+    - name: Show space after cleanup
+      shell: |
+        df -h / /u01 /stage 2>/dev/null
+        echo
+        du -xhd1 / 2>/dev/null | sort -h
+      register: cleanup_stage_space
+      changed_when: false
+
+    - name: Print cleanup result
+      debug:
+        var: cleanup_stage_space.stdout_lines
