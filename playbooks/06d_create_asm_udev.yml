@@ -1,2 +1,51 @@
 ---
-# Placeholder for 06d_create_asm_udev.yml
+- name: Create ASM udev rules
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Create /dev/asm directory
+      file:
+        path: /dev/asm
+        state: directory
+        owner: grid
+        group: asmadmin
+        mode: '0775'
+
+    - name: Create Oracle ASM udev rules
+      copy:
+        dest: /etc/udev/rules.d/99-oracle-asm.rules
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          KERNEL=="sd*", ENV{ID_SERIAL}=="VBOX_HARDDISK_VBddaa40bb-7a1b3dc7", SYMLINK+="asm/OCR01", OWNER="grid", GROUP="asmadmin", MODE="0660"
+          KERNEL=="sd*", ENV{ID_SERIAL}=="VBOX_HARDDISK_VB73715a8d-a73c68c9", SYMLINK+="asm/DATA01", OWNER="grid", GROUP="asmadmin", MODE="0660"
+          KERNEL=="sd*", ENV{ID_SERIAL}=="VBOX_HARDDISK_VB1c21c696-703123cf", SYMLINK+="asm/FRA01", OWNER="grid", GROUP="asmadmin", MODE="0660"
+
+    - name: Reload udev rules
+      shell: |
+        udevadm control --reload-rules
+        udevadm trigger
+        udevadm settle
+      changed_when: true
+
+    - name: Verify ASM devices
+      shell: |
+        ls -l /dev/asm || true
+        echo
+        for d in /dev/asm/OCR01 /dev/asm/DATA01 /dev/asm/FRA01; do
+          echo "Checking $d"
+          ls -l "$d" || exit 1
+          readlink -f "$d"
+        done
+      register: asm_udev_check
+      changed_when: false
+
+    - name: Print ASM udev verification
+      debug:
+        var: asm_udev_check.stdout_lines
