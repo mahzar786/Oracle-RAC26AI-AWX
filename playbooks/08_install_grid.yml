@@ -229,7 +229,7 @@
           ORACLE_BASE={{ grid_base }}
           ORACLE_HOME={{ grid_home }}
 
-          configureCluster=true
+          configureCluster=RAC
           clusterUsage=GENERAL_PURPOSE
           configureAsExtendedCluster=false
 
