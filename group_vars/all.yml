@@ -91,8 +91,8 @@ db_zip: LINUX.X64_2326100_db_home.zip
 # Grid Infrastructure passwords
 # Move these to an AWX Survey or Ansible Vault after installation testing.
 ###############################################################################
-sys_password: "racattack"
-asm_monitor_password: "racattack"
+sys_password: 'RacAttack#2026'
+asm_monitor_password: 'RacAttack#2026'
 
 
 ###############################################################################
@@ -146,5 +146,5 @@ db_charset: AL32UTF8
 db_ncharset: AL16UTF16
 db_type: RAC
 
-system_password: "racattack#2026"
-pdb_admin_password: "racattack#2026"
+system_password: 'RacAttack#2026'
+pdb_admin_password: 'RacAttack#2026'
