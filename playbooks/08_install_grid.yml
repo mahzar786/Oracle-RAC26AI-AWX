@@ -187,7 +187,6 @@
         testfile="/tmp/.ansible-grid/grid_test_$$"
         touch "${testfile}"
         rm -f "${testfile}"
-      args:
         executable: /bin/bash
       changed_when: false
 
