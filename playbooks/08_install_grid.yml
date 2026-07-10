@@ -38,19 +38,50 @@
           group_vars/all.yml.
         success_msg: "Required Grid variables are defined."
 
-    - name: Validate Grid installer exists
-      ansible.builtin.stat:
-        path: "{{ grid_home }}/gridSetup.sh"
-      register: gridsetup_stat
+      - name: Validate Grid installer exists on primary node
+        ansible.builtin.stat:
+          path: "{{ grid_home }}/gridSetup.sh"
+        register: gridsetup_stat
+        when: inventory_hostname == node1_name
 
-    - name: Fail if Grid installer is missing
-      ansible.builtin.assert:
-        that:
-          - gridsetup_stat.stat.exists
-          - gridsetup_stat.stat.isreg
-        fail_msg: "{{ grid_home }}/gridSetup.sh is missing."
-        success_msg: "Grid installer exists."
+      - name: Fail if Grid installer is missing on primary node
+        ansible.builtin.assert:
+          that:
+            - gridsetup_stat.stat.exists
+            - gridsetup_stat.stat.isreg
+            - gridsetup_stat.stat.executable
+          fail_msg: >-
+            {{ grid_home }}/gridSetup.sh is missing or not executable
+            on {{ node1_name }}.
+          success_msg: "Grid installer exists on {{ node1_name }}."
+        when: inventory_hostname == node1_name
 
+      - name: Check secondary Grid home is empty
+        ansible.builtin.shell: |
+          if [ ! -d "{{ grid_home }}" ]; then
+            echo "EMPTY"
+          elif [ -z "$(find "{{ grid_home }}" -mindepth 1 -print -quit)" ]; then
+            echo "EMPTY"
+          else
+            echo "NOT_EMPTY"
+            find "{{ grid_home }}" -mindepth 1 -maxdepth 1 | head -20
+          fi
+        args:
+          executable: /bin/bash
+        register: secondary_grid_home_check
+        changed_when: false
+        when: inventory_hostname == node2_name
+
+      - name: Fail if secondary Grid home is not empty
+        ansible.builtin.assert:
+          that:
+            - secondary_grid_home_check.stdout_lines[0] == "EMPTY"
+          fail_msg: >-
+            {{ grid_home }} on {{ node2_name }} is not empty.
+            Oracle must copy Grid software from {{ node1_name }}.
+          success_msg: >-
+            {{ grid_home }} on {{ node2_name }} is empty and ready.
+        when: inventory_hostname == node2_name
     - name: Validate OCR ASM device exists
       ansible.builtin.stat:
         path: /dev/asm/OCR01
