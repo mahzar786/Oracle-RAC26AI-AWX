@@ -146,5 +146,5 @@ db_charset: AL32UTF8
 db_ncharset: AL16UTF16
 db_type: RAC
 
-system_password: "racattack"
-pdb_admin_password: "racattack"
+system_password: "racattack#2026"
+pdb_admin_password: "racattack#2026"
