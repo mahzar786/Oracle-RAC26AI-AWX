@@ -1,2 +1,111 @@
 ---
-# Placeholder for 08_install_grid.yml
+- name: Install Oracle Grid Infrastructure RAC
+  hosts: racs1
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Create Grid response file
+      copy:
+        dest: /tmp/grid_install.rsp
+        owner: grid
+        group: oinstall
+        mode: '0644'
+        content: |
+          oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
+          INVENTORY_LOCATION=/u01/app/oraInventory
+          oracle.install.option=CRS_CONFIG
+          ORACLE_BASE={{ grid_base }}
+          oracle.install.asm.OSDBA=asmdba
+          oracle.install.asm.OSOPER=asmoper
+          oracle.install.asm.OSASM=asmadmin
+          oracle.install.crs.config.scanType=LOCAL_SCAN
+          oracle.install.crs.config.gpnp.scanName={{ scan_name }}
+          oracle.install.crs.config.gpnp.scanPort=1521
+          oracle.install.crs.config.ClusterConfiguration=STANDALONE
+          oracle.install.crs.config.configureAsExtendedCluster=false
+          oracle.install.crs.config.clusterName={{ cluster_name }}
+          oracle.install.crs.config.clusterNodes={{ node1_name }}:{{ node1_vip }}:HUB,{{ node2_name }}:{{ node2_vip }}:HUB
+          oracle.install.crs.config.networkInterfaceList=enp0s3:192.168.56.0:1,enp0s8:192.168.57.0:5
+          oracle.install.crs.configureGIMR=false
+          oracle.install.crs.config.storageOption=FLEX_ASM_STORAGE
+          oracle.install.crs.config.useIPMI=false
+          oracle.install.asm.SYSASMPassword={{ sys_password }}
+          oracle.install.asm.monitorPassword={{ sys_password }}
+          oracle.install.crs.config.asm.diskGroup.name={{ ocr_diskgroup }}
+          oracle.install.crs.config.asm.diskGroup.redundancy=EXTERNAL
+          oracle.install.crs.config.asm.diskGroup.AUSize=4
+          oracle.install.crs.config.asm.diskGroup.disks=/dev/asm/OCR01
+          oracle.install.crs.config.asm.diskGroup.diskDiscoveryString=/dev/asm/*
+          oracle.install.crs.rootconfig.executeRootScript=false
+
+    - name: Run Grid setup silent install from racs1
+      become_user: grid
+      shell: |
+        export CV_ASSUME_DISTID=OL8
+        export ORACLE_HOME={{ grid_home }}
+        export ORACLE_BASE={{ grid_base }}
+        {{ grid_home }}/gridSetup.sh -silent -responseFile /tmp/grid_install.rsp -ignorePrereqFailure
+      register: grid_install
+      failed_when: grid_install.rc not in [0,6]
+      changed_when: true
+
+    - name: Show Grid install output
+      debug:
+        var: grid_install.stdout_lines
+
+- name: Run root scripts on both RAC nodes
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Run orainstRoot.sh if exists
+      shell: |
+        if [ -x /u01/app/oraInventory/orainstRoot.sh ]; then
+          /u01/app/oraInventory/orainstRoot.sh
+        fi
+      register: orainst_root
+      failed_when: false
+      changed_when: true
+
+    - name: Run Grid root.sh
+      shell: |
+        if [ -x {{ grid_home }}/root.sh ]; then
+          {{ grid_home }}/root.sh
+        else
+          echo "root.sh not found"
+          exit 1
+        fi
+      register: grid_root
+      changed_when: true
+
+    - name: Show root.sh output
+      debug:
+        var: grid_root.stdout_lines
+
+- name: Validate Grid status
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Check CRS status
+      shell: |
+        {{ grid_home }}/bin/crsctl check crs || true
+        {{ grid_home }}/bin/crsctl stat res -t || true
+      register: crs_status
+      changed_when: false
+
+    - name: Print CRS status
+      debug:
+        var: crs_status.stdout_lines
