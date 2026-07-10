@@ -171,20 +171,22 @@
       ansible.builtin.debug:
         var: name_resolution_check.stdout_lines
 
-    - name: Create Ansible temporary directory on u01
+    - name: Create Ansible temporary directory
+      become: true
       ansible.builtin.file:
-        path: /u01/.ansible/tmp
+        path: /tmp/.ansible-grid
         state: directory
         owner: root
         group: root
         mode: "1777"
 
     - name: Verify grid can use Ansible temporary directory
+      become: true
+      become_user: grid
       ansible.builtin.shell: |
-        testfile="/u01/.ansible/tmp/grid_test_$$"
+        testfile="/tmp/.ansible-grid/grid_test_$$"
         touch "${testfile}"
         rm -f "${testfile}"
-      become_user: grid
       args:
         executable: /bin/bash
       changed_when: false
