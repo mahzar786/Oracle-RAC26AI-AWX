@@ -1,5 +1,199 @@
 ---
-- name: Install Oracle Grid Infrastructure RAC
+###############################################################################
+# PLAY 1: Validate both RAC nodes before starting Grid installation
+###############################################################################
+- name: Precheck Oracle Grid Infrastructure installation
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Validate required Grid variables
+      ansible.builtin.assert:
+        that:
+          - cluster_name is defined
+          - cluster_name | length > 0
+          - scan_name is defined
+          - scan_name | length > 0
+          - node1_name is defined
+          - node2_name is defined
+          - grid_base is defined
+          - grid_home is defined
+          - sys_password is defined
+          - asm_monitor_password is defined
+          - ocr_diskgroup is defined
+          - public_interface is defined
+          - private_interface is defined
+          - public_subnet is defined
+          - private_subnet is defined
+          - asmdba_group is defined
+          - asmoper_group is defined
+          - asmadmin_group is defined
+        fail_msg: >-
+          One or more required Grid variables are missing from
+          group_vars/all.yml.
+        success_msg: "Required Grid variables are defined."
+
+    - name: Validate Grid installer exists
+      ansible.builtin.stat:
+        path: "{{ grid_home }}/gridSetup.sh"
+      register: gridsetup_stat
+
+    - name: Fail if Grid installer is missing
+      ansible.builtin.assert:
+        that:
+          - gridsetup_stat.stat.exists
+          - gridsetup_stat.stat.isreg
+        fail_msg: "{{ grid_home }}/gridSetup.sh is missing."
+        success_msg: "Grid installer exists."
+
+    - name: Validate OCR ASM device exists
+      ansible.builtin.stat:
+        path: /dev/asm/OCR01
+        follow: true
+      register: ocr_device_stat
+
+    - name: Fail if OCR ASM device is missing
+      ansible.builtin.assert:
+        that:
+          - ocr_device_stat.stat.exists
+          - ocr_device_stat.stat.isblk
+        fail_msg: "/dev/asm/OCR01 is missing or is not a block device."
+        success_msg: "/dev/asm/OCR01 is available."
+
+    - name: Validate OCR device ownership permissions and signatures
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        echo "Host: $(hostname)"
+        echo "OCR symlink:"
+        ls -l /dev/asm/OCR01
+
+        REALDEV=$(readlink -f /dev/asm/OCR01)
+
+        echo
+        echo "Resolved device: ${REALDEV}"
+        ls -l "${REALDEV}"
+
+        OWNER=$(stat -c '%U' "${REALDEV}")
+        GROUP=$(stat -c '%G' "${REALDEV}")
+        MODE=$(stat -c '%a' "${REALDEV}")
+
+        echo "Owner=${OWNER}"
+        echo "Group=${GROUP}"
+        echo "Mode=${MODE}"
+
+        [ "${OWNER}" = "grid" ] || {
+          echo "ERROR: OCR device owner must be grid"
+          exit 1
+        }
+
+        [ "${GROUP}" = "asmadmin" ] || {
+          echo "ERROR: OCR device group must be asmadmin"
+          exit 1
+        }
+
+        case "${MODE}" in
+          660|0660)
+            ;;
+          *)
+            echo "ERROR: OCR device mode must be 660"
+            exit 1
+            ;;
+        esac
+
+        if findmnt -rn -S "${REALDEV}" >/dev/null 2>&1; then
+          echo "ERROR: ${REALDEV} is mounted"
+          exit 1
+        fi
+
+        SIGNATURES=$(wipefs -n "${REALDEV}" 2>/dev/null || true)
+
+        if [ -n "${SIGNATURES}" ]; then
+          echo "ERROR: Existing signatures found on ${REALDEV}"
+          echo "${SIGNATURES}"
+          exit 1
+        fi
+
+        echo "OCR device validation passed."
+      args:
+        executable: /bin/bash
+      register: ocr_device_check
+      changed_when: false
+
+    - name: Show OCR device validation
+      ansible.builtin.debug:
+        var: ocr_device_check.stdout_lines
+
+    - name: Validate public and private interfaces
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        ip link show "{{ public_interface }}" >/dev/null
+        ip link show "{{ private_interface }}" >/dev/null
+
+        ip -4 addr show "{{ public_interface }}" |
+          grep -q "{{ public_subnet | regex_replace('\\.0$', '.') }}"
+
+        ip -4 addr show "{{ private_interface }}" |
+          grep -q "{{ private_subnet | regex_replace('\\.0$', '.') }}"
+
+        echo "Public  : {{ public_interface }} / {{ public_subnet }}"
+        echo "Private : {{ private_interface }} / {{ private_subnet }}"
+      args:
+        executable: /bin/bash
+      register: interface_check
+      changed_when: false
+
+    - name: Show interface validation
+      ansible.builtin.debug:
+        var: interface_check.stdout_lines
+
+    - name: Validate cluster host and VIP resolution
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        getent hosts "{{ node1_name }}"
+        getent hosts "{{ node2_name }}"
+        getent hosts "{{ node1_name }}-vip"
+        getent hosts "{{ node2_name }}-vip"
+        getent hosts "{{ scan_name }}"
+      args:
+        executable: /bin/bash
+      register: name_resolution_check
+      changed_when: false
+
+    - name: Show hostname resolution
+      ansible.builtin.debug:
+        var: name_resolution_check.stdout_lines
+
+    - name: Create Ansible temporary directory on u01
+      ansible.builtin.file:
+        path: /u01/.ansible/tmp
+        state: directory
+        owner: root
+        group: root
+        mode: "1777"
+
+    - name: Verify grid can use Ansible temporary directory
+      ansible.builtin.shell: |
+        testfile="/u01/.ansible/tmp/grid_test_$$"
+        touch "${testfile}"
+        rm -f "${testfile}"
+      become_user: grid
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+
+###############################################################################
+# PLAY 2: Generate the correct 23.x response file and run Grid setup
+###############################################################################
+- name: Install Oracle Grid Infrastructure RAC from first node
   hosts: racs1
   become: true
   gather_facts: false
@@ -8,104 +202,353 @@
     - ../group_vars/all.yml
 
   tasks:
-    - name: Create Grid response file
-      copy:
+    - name: Remove previous temporary Grid response and logs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/grid_install.rsp
+        - /tmp/grid_install_stdout.log
+
+    - name: Create Grid response file using 23.x schema
+      ansible.builtin.copy:
         dest: /tmp/grid_install.rsp
         owner: grid
         group: oinstall
-        mode: '0644'
+        mode: "0600"
         content: |
-          oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
+          oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v23.0.0
+
+          installOption=CRS_CONFIG
+
           INVENTORY_LOCATION=/u01/app/oraInventory
-          oracle.install.option=CRS_CONFIG
+          UNIX_GROUP_NAME=oinstall
+
           ORACLE_BASE={{ grid_base }}
-          oracle.install.asm.OSDBA=asmdba
-          oracle.install.asm.OSOPER=asmoper
-          oracle.install.asm.OSASM=asmadmin
-          oracle.install.crs.config.scanType=LOCAL_SCAN
-          oracle.install.crs.config.gpnp.scanName={{ scan_name }}
-          oracle.install.crs.config.gpnp.scanPort=1521
-          oracle.install.crs.config.ClusterConfiguration=STANDALONE
-          oracle.install.crs.config.configureAsExtendedCluster=false
-          oracle.install.crs.config.clusterName={{ cluster_name }}
-          oracle.install.crs.config.clusterNodes={{ node1_name }}:{{ node1_vip }}:HUB,{{ node2_name }}:{{ node2_vip }}:HUB
-          oracle.install.crs.config.networkInterfaceList=enp0s3:192.168.56.0:1,enp0s8:192.168.57.0:5
-          oracle.install.crs.configureGIMR=false
-          oracle.install.crs.config.storageOption=FLEX_ASM_STORAGE
-          oracle.install.crs.config.useIPMI=false
-          oracle.install.asm.SYSASMPassword={{ sys_password }}
-          oracle.install.asm.monitorPassword={{ asm_monitor_password }}
-          oracle.install.crs.config.asm.diskGroup.name={{ ocr_diskgroup }}
-          oracle.install.crs.config.asm.diskGroup.redundancy=EXTERNAL
-          oracle.install.crs.config.asm.diskGroup.AUSize=4
-          oracle.install.crs.config.asm.diskGroup.disks=/dev/asm/OCR01
-          oracle.install.crs.config.asm.diskGroup.diskDiscoveryString=/dev/asm/*
-          oracle.install.crs.rootconfig.executeRootScript=false
+          ORACLE_HOME={{ grid_home }}
 
-    - name: Run Grid setup silent install from racs1
-      become_user: grid
-      shell: |
-        export CV_ASSUME_DISTID=OL8
-        export ORACLE_HOME={{ grid_home }}
-        export ORACLE_BASE={{ grid_base }}
-        {{ grid_home }}/gridSetup.sh -silent -responseFile /tmp/grid_install.rsp -ignorePrereqFailure
-      register: grid_install
-      failed_when: grid_install.rc not in [0,6]
-      changed_when: true
+          configureCluster=true
+          clusterUsage=GENERAL_PURPOSE
+          configureAsExtendedCluster=false
 
-    - name: Show Grid install output
-      debug:
-        var: grid_install.stdout_lines
+          scanType=LOCAL_SCAN
+          scanName={{ scan_name }}
+          scanPort=1521
 
-- name: Run root scripts on both RAC nodes
-  hosts: all
-  become: true
-  gather_facts: false
+          clusterName={{ cluster_name }}
 
-  vars_files:
-    - ../group_vars/all.yml
+          configureDHCPAssignedVIPs=false
+          clusterNodes={{ node1_name }}:{{ node1_name }}-vip,{{ node2_name }}:{{ node2_name }}-vip
 
-  tasks:
-    - name: Run orainstRoot.sh if exists
-      shell: |
-        if [ -x /u01/app/oraInventory/orainstRoot.sh ]; then
-          /u01/app/oraInventory/orainstRoot.sh
-        fi
-      register: orainst_root
-      failed_when: false
-      changed_when: true
+          networkInterfaceList={{ public_interface }}:{{ public_subnet }}:1,{{ private_interface }}:{{ private_subnet }}:5
 
-    - name: Run Grid root.sh
-      shell: |
-        if [ -x {{ grid_home }}/root.sh ]; then
-          {{ grid_home }}/root.sh
-        else
-          echo "root.sh not found"
-          exit 1
-        fi
-      register: grid_root
-      changed_when: true
+          storageOption=FLEX_ASM_STORAGE
 
-    - name: Show root.sh output
-      debug:
-        var: grid_root.stdout_lines
+          configureGNS=false
+          useIPMI=false
+          enableAutoFixup=false
 
-- name: Validate Grid status
-  hosts: all
-  become: true
-  gather_facts: false
+          OSDBA={{ asmdba_group }}
+          OSOPER={{ asmoper_group }}
+          OSASM={{ asmadmin_group }}
 
-  vars_files:
-    - ../group_vars/all.yml
+          diskGroupName={{ ocr_diskgroup }}
+          redundancy=EXTERNAL
+          auSize=4
+          diskList={{ ocr_disks | join(',') }}
+          diskString={{ asm_disk_discovery_string }}
+          sysasmPassword={{ sys_password }}
+          asmsnmpPassword={{ asm_monitor_password }}
 
-  tasks:
-    - name: Check CRS status
-      shell: |
-        {{ grid_home }}/bin/crsctl check crs || true
-        {{ grid_home }}/bin/crsctl stat res -t || true
-      register: crs_status
+          configureBackupDG=false
+          executeRootScript=false
+      no_log: true
+
+    - name: Display generated response file without passwords
+      ansible.builtin.shell: |
+        sed \
+          -e 's/^sysasmPassword=.*/sysasmPassword=********/' \
+          -e 's/^asmsnmpPassword=.*/asmsnmpPassword=********/' \
+          /tmp/grid_install.rsp
+      args:
+        executable: /bin/bash
+      register: sanitized_grid_response
       changed_when: false
 
-    - name: Print CRS status
-      debug:
-        var: crs_status.stdout_lines
+    - name: Print sanitized Grid response file
+      ansible.builtin.debug:
+        var: sanitized_grid_response.stdout_lines
+
+    - name: Validate response-file syntax using Grid setup
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        export CV_ASSUME_DISTID=OL8
+        export ORACLE_HOME="{{ grid_home }}"
+        export ORACLE_BASE="{{ grid_base }}"
+        export PATH="${ORACLE_HOME}/bin:${PATH}"
+
+        "{{ grid_home }}/gridSetup.sh" \
+          -silent \
+          -responseFile /tmp/grid_install.rsp \
+          -executePrereqs \
+          -ignorePrereqFailure
+      become_user: grid
+      args:
+        executable: /bin/bash
+      register: grid_prereq
+      changed_when: false
+      failed_when: grid_prereq.rc not in [0, 6]
+
+    - name: Show Grid prerequisite output
+      ansible.builtin.debug:
+        var: grid_prereq.stdout_lines
+
+    - name: Run Grid setup silent installation from racs1
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        export CV_ASSUME_DISTID=OL8
+        export ORACLE_HOME="{{ grid_home }}"
+        export ORACLE_BASE="{{ grid_base }}"
+        export PATH="${ORACLE_HOME}/bin:${PATH}"
+
+        "{{ grid_home }}/gridSetup.sh" \
+          -silent \
+          -responseFile /tmp/grid_install.rsp \
+          -ignorePrereqFailure \
+          2>&1 | tee /tmp/grid_install_stdout.log
+
+        exit ${PIPESTATUS[0]}
+      become_user: grid
+      args:
+        executable: /bin/bash
+      register: grid_install
+      changed_when: true
+      failed_when: grid_install.rc not in [0, 6]
+
+    - name: Show Grid install output
+      ansible.builtin.debug:
+        var: grid_install.stdout_lines
+
+    - name: Verify inventory root script exists on racs1
+      ansible.builtin.stat:
+        path: /u01/app/oraInventory/orainstRoot.sh
+      register: orainst_root_stat
+
+    - name: Verify Grid root script exists on racs1
+      ansible.builtin.stat:
+        path: "{{ grid_home }}/root.sh"
+      register: grid_root_stat
+
+    - name: Fail if required root scripts were not generated
+      ansible.builtin.assert:
+        that:
+          - orainst_root_stat.stat.exists
+          - grid_root_stat.stat.exists
+        fail_msg: >-
+          Grid software setup did not generate orainstRoot.sh and/or root.sh.
+          Review /tmp/grid_install_stdout.log and the Grid installer logs.
+        success_msg: "Grid root scripts were generated successfully."
+
+
+###############################################################################
+# PLAY 3: Run root scripts on the first node
+###############################################################################
+- name: Run Grid root scripts on racs1
+  hosts: racs1
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Run orainstRoot.sh on racs1
+      ansible.builtin.command:
+        cmd: /u01/app/oraInventory/orainstRoot.sh
+      register: orainst_root_node1
+      changed_when: true
+      failed_when: orainst_root_node1.rc != 0
+
+    - name: Show racs1 orainstRoot output
+      ansible.builtin.debug:
+        var: orainst_root_node1.stdout_lines
+
+    - name: Run Grid root.sh on racs1
+      ansible.builtin.shell: |
+        set -o pipefail
+        "{{ grid_home }}/root.sh" 2>&1 |
+          tee /tmp/grid_root_racs1.log
+
+        exit ${PIPESTATUS[0]}
+      args:
+        executable: /bin/bash
+      register: grid_root_node1
+      changed_when: true
+      failed_when: grid_root_node1.rc != 0
+
+    - name: Show racs1 root.sh output
+      ansible.builtin.debug:
+        var: grid_root_node1.stdout_lines
+
+
+###############################################################################
+# PLAY 4: Run root scripts on the second node only after racs1 succeeds
+###############################################################################
+- name: Run Grid root scripts on racs2
+  hosts: racs2
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Verify inventory root script exists on racs2
+      ansible.builtin.stat:
+        path: /u01/app/oraInventory/orainstRoot.sh
+      register: orainst_root_node2_stat
+
+    - name: Verify Grid root script exists on racs2
+      ansible.builtin.stat:
+        path: "{{ grid_home }}/root.sh"
+      register: grid_root_node2_stat
+
+    - name: Fail if racs2 root scripts are missing
+      ansible.builtin.assert:
+        that:
+          - orainst_root_node2_stat.stat.exists
+          - grid_root_node2_stat.stat.exists
+        fail_msg: "Required Grid root scripts are missing on racs2."
+
+    - name: Run orainstRoot.sh on racs2
+      ansible.builtin.command:
+        cmd: /u01/app/oraInventory/orainstRoot.sh
+      register: orainst_root_node2
+      changed_when: true
+      failed_when: orainst_root_node2.rc != 0
+
+    - name: Show racs2 orainstRoot output
+      ansible.builtin.debug:
+        var: orainst_root_node2.stdout_lines
+
+    - name: Run Grid root.sh on racs2
+      ansible.builtin.shell: |
+        set -o pipefail
+        "{{ grid_home }}/root.sh" 2>&1 |
+          tee /tmp/grid_root_racs2.log
+
+        exit ${PIPESTATUS[0]}
+      args:
+        executable: /bin/bash
+      register: grid_root_node2
+      changed_when: true
+      failed_when: grid_root_node2.rc != 0
+
+    - name: Show racs2 root.sh output
+      ansible.builtin.debug:
+        var: grid_root_node2.stdout_lines
+
+
+###############################################################################
+# PLAY 5: Complete Grid configuration from the first node
+###############################################################################
+- name: Complete Oracle Grid Infrastructure configuration
+  hosts: racs1
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Run Grid configuration tools
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        export CV_ASSUME_DISTID=OL8
+        export ORACLE_HOME="{{ grid_home }}"
+        export ORACLE_BASE="{{ grid_base }}"
+        export PATH="${ORACLE_HOME}/bin:${PATH}"
+
+        "{{ grid_home }}/gridSetup.sh" \
+          -executeConfigTools \
+          -silent \
+          -responseFile /tmp/grid_install.rsp \
+          2>&1 | tee /tmp/grid_config_tools.log
+
+        exit ${PIPESTATUS[0]}
+      become_user: grid
+      args:
+        executable: /bin/bash
+      register: grid_config_tools
+      changed_when: true
+      failed_when: grid_config_tools.rc not in [0, 6]
+
+    - name: Show Grid configuration tools output
+      ansible.builtin.debug:
+        var: grid_config_tools.stdout_lines
+
+
+###############################################################################
+# PLAY 6: Validate Grid Infrastructure on both nodes
+###############################################################################
+- name: Validate Oracle Grid Infrastructure status
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Check local CRS status
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_check
+      changed_when: false
+      failed_when: crs_check.rc != 0
+
+    - name: Show local CRS status
+      ansible.builtin.debug:
+        var: crs_check.stdout_lines
+
+    - name: Check Clusterware resources
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl stat res -t"
+      register: crs_resources
+      changed_when: false
+      failed_when: crs_resources.rc != 0
+
+    - name: Show Clusterware resources
+      ansible.builtin.debug:
+        var: crs_resources.stdout_lines
+
+    - name: Check ASM status
+      ansible.builtin.shell: |
+        su - grid -c '
+          export ORACLE_HOME="{{ grid_home }}"
+          export PATH="$ORACLE_HOME/bin:$PATH"
+          srvctl status asm
+        '
+      args:
+        executable: /bin/bash
+      register: asm_status
+      changed_when: false
+      failed_when: false
+
+    - name: Show ASM status
+      ansible.builtin.debug:
+        var: asm_status.stdout_lines
+
+    - name: Final Grid status summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "Grid Infrastructure validation completed on {{ inventory_hostname }}"
+          - "CRS status: PASS"
+          - "Cluster resources: PASS"
+          - "Next step: 08a_create_data_fra_diskgroups.yml"
+          - "============================================================"

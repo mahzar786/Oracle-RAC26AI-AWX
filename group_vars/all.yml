@@ -1,36 +1,130 @@
 ---
+###############################################################################
+# Oracle RAC cluster identity
+###############################################################################
 cluster_name: RACSCL
+
 scan_name: racs-scan
-scan_ip:
+scan_port: 1521
+
+scan_ips:
   - 192.168.56.84
   - 192.168.56.85
   - 192.168.56.86
 
+
+###############################################################################
+# RAC node names and addresses
+###############################################################################
 node1_name: racs1
 node2_name: racs2
+
+node1_fqdn: racs1.lab
+node2_fqdn: racs2.lab
+
 node1_public_ip: 192.168.56.80
 node2_public_ip: 192.168.56.81
+
+node1_private_name: racs1-priv
+node2_private_name: racs2-priv
+
+node1_private_ip: 192.168.57.80
+node2_private_ip: 192.168.57.81
+
+node1_vip_name: racs1-vip
+node2_vip_name: racs2-vip
+
 node1_vip: 192.168.56.82
 node2_vip: 192.168.56.83
 
+
+###############################################################################
+# Network configuration
+###############################################################################
+public_interface: enp0s3
+private_interface: enp0s8
+
+public_subnet: 192.168.56.0
+private_subnet: 192.168.57.0
+
+public_prefix: 24
+private_prefix: 24
+
+
+###############################################################################
+# Operating-system users and groups
+###############################################################################
 grid_user: grid
 oracle_user: oracle
+
+oinstall_group: oinstall
+dba_group: dba
+
+asmadmin_group: asmadmin
+asmdba_group: asmdba
+asmoper_group: asmoper
+
+
+###############################################################################
+# Oracle directories
+###############################################################################
 oracle_base: /u01/app/oracle
 grid_base: /u01/app/grid
+
 grid_home: /u01/app/26ai/grid
 oracle_home: /u01/app/oracle/product/26ai/dbhome_1
+
 ora_inventory: /u01/app/oraInventory
 stage_dir: /stage/26ai
 
 ansible_remote_tmp: /u01/.ansible/tmp
 
+
+###############################################################################
+# Oracle installation media
+###############################################################################
+grid_zip: LINUX.X64_2326100_grid_home.zip
+db_zip: LINUX.X64_2326100_db_home.zip
+
+
+###############################################################################
+# Grid Infrastructure passwords
+# Move these to an AWX Survey or Ansible Vault after installation testing.
+###############################################################################
 sys_password: "racattack"
 asm_monitor_password: "racattack"
 
+
+###############################################################################
+# ASM disk-group names
+###############################################################################
 ocr_diskgroup: OCR
 data_diskgroup: DATA
 fra_diskgroup: FRA
 
+asm_redundancy: EXTERNAL
+asm_au_size: 4
+asm_disk_discovery_string: "/dev/asm/*"
+
+
+###############################################################################
+# Stable physical disk IDs
+# Used by disk discovery, safety validation, cleanup, and udev creation.
+###############################################################################
+ocr_disk_ids:
+  - /dev/disk/by-id/ata-VBOX_HARDDISK_VBddaa40bb-7a1b3dc7
+
+data_disk_ids:
+  - /dev/disk/by-id/ata-VBOX_HARDDISK_VB73715a8d-a73c68c9
+
+fra_disk_ids:
+  - /dev/disk/by-id/ata-VBOX_HARDDISK_VB1c21c696-703123cf
+
+
+###############################################################################
+# Persistent ASM device aliases
+# Used by Grid setup, ASMCA, and DBCA.
+###############################################################################
 ocr_disks:
   - /dev/asm/OCR01
 
@@ -40,23 +134,17 @@ data_disks:
 fra_disks:
   - /dev/asm/FRA01
 
-public_interface: enp0s3
-private_interface: enp0s8
 
-public_subnet: 192.168.56.0
-private_subnet: 192.168.57.0
+###############################################################################
+# Database configuration
+###############################################################################
+db_name: TESTCDB
+db_unique_name: TESTCDB
+pdb_name: TESTPDB
 
-asmadmin_group: asmadmin
-asmdba_group: asmdba
-asmoper_group: asmoper
+db_charset: AL32UTF8
+db_ncharset: AL16UTF16
+db_type: RAC
 
-
-grid_zip: LINUX.X64_2326100_grid_home.zip
-db_zip: LINUX.X64_2326100_db_home.zip
-
-ocr_disks:
-  - /dev/disk/by-id/ata-VBOX_HARDDISK_VBddaa40bb-7a1b3dc7
-data_disks:
-  - /dev/disk/by-id/ata-VBOX_HARDDISK_VB73715a8d-a73c68c9
-fra_disks:
-  - /dev/disk/by-id/ata-VBOX_HARDDISK_VB1c21c696-703123cf
+system_password: "racattack"
+pdb_admin_password: "racattack"
