@@ -23,8 +23,34 @@ ora_inventory: /u01/app/oraInventory
 stage_dir: /stage/26ai
 
 ansible_remote_tmp: /u01/.ansible/tmp
+
 sys_password: "racattack"
 asm_monitor_password: "racattack"
+
+ocr_diskgroup: OCR
+data_diskgroup: DATA
+fra_diskgroup: FRA
+
+ocr_disks:
+  - /dev/asm/OCR01
+
+data_disks:
+  - /dev/asm/DATA01
+
+fra_disks:
+  - /dev/asm/FRA01
+
+public_interface: enp0s3
+private_interface: enp0s8
+
+public_subnet: 192.168.56.0
+private_subnet: 192.168.57.0
+
+asmadmin_group: asmadmin
+asmdba_group: asmdba
+asmoper_group: asmoper
+
+
 grid_zip: LINUX.X64_2326100_grid_home.zip
 db_zip: LINUX.X64_2326100_db_home.zip
 
