@@ -170,3 +170,174 @@
     - name: Print cleanup status
       debug:
         var: cleanup_status.stdout_lines
+
+###############################################################################
+# CLEAN GRID HOMES AND INVENTORY FOR FRESH INSTALL
+###############################################################################
+- name: Clean Grid homes and inventory for fresh installation
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Stop any remaining Grid installer processes
+      ansible.builtin.shell: |
+        pkill -9 -f "gridSetup.sh" || true
+        pkill -9 -f "runInstaller" || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+
+    - name: Check whether Clusterware processes are still running
+      ansible.builtin.shell: |
+        ps -ef | egrep 'ohasd|crsd|ocssd|evmd|asm_pmon' | grep -v grep || true
+      args:
+        executable: /bin/bash
+      register: grid_process_check
+      changed_when: false
+
+    - name: Display remaining Grid processes
+      ansible.builtin.debug:
+        var: grid_process_check.stdout_lines
+
+    - name: Remove old Grid Home completely
+      ansible.builtin.file:
+        path: "{{ grid_home }}"
+        state: absent
+
+    - name: Recreate empty Grid Home
+      ansible.builtin.file:
+        path: "{{ grid_home }}"
+        state: directory
+        owner: grid
+        group: oinstall
+        mode: "0775"
+
+    - name: Remove old Grid Base completely
+      ansible.builtin.file:
+        path: "{{ grid_base }}"
+        state: absent
+
+    - name: Recreate empty Grid Base
+      ansible.builtin.file:
+        path: "{{ grid_base }}"
+        state: directory
+        owner: grid
+        group: oinstall
+        mode: "0775"
+
+    - name: Remove old central Oracle inventory
+      ansible.builtin.file:
+        path: /u01/app/oraInventory
+        state: absent
+
+    - name: Recreate empty central Oracle inventory
+      ansible.builtin.file:
+        path: /u01/app/oraInventory
+        state: directory
+        owner: grid
+        group: oinstall
+        mode: "0775"
+
+    - name: Remove previous temporary Grid response and install logs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/grid_install.rsp
+        - /tmp/grid_install_stdout.log
+
+    - name: Check Grid Home is empty
+      ansible.builtin.shell: |
+        find "{{ grid_home }}" -mindepth 1 -print -quit
+      args:
+        executable: /bin/bash
+      register: grid_home_contents
+      changed_when: false
+
+    - name: Fail if Grid Home is not empty
+      ansible.builtin.assert:
+        that:
+          - grid_home_contents.stdout | trim == ""
+        fail_msg: >-
+          {{ grid_home }} is not empty on {{ inventory_hostname }}.
+        success_msg: >-
+          {{ grid_home }} is empty on {{ inventory_hostname }}.
+
+    - name: Check Grid Base is empty
+      ansible.builtin.shell: |
+        find "{{ grid_base }}" -mindepth 1 -print -quit
+      args:
+        executable: /bin/bash
+      register: grid_base_contents
+      changed_when: false
+
+    - name: Fail if Grid Base is not empty
+      ansible.builtin.assert:
+        that:
+          - grid_base_contents.stdout | trim == ""
+        fail_msg: >-
+          {{ grid_base }} is not empty on {{ inventory_hostname }}.
+        success_msg: >-
+          {{ grid_base }} is empty on {{ inventory_hostname }}.
+
+    - name: Check central inventory is empty
+      ansible.builtin.shell: |
+        find /u01/app/oraInventory -mindepth 1 -print -quit
+      args:
+        executable: /bin/bash
+      register: inventory_contents
+      changed_when: false
+
+    - name: Fail if central inventory is not empty
+      ansible.builtin.assert:
+        that:
+          - inventory_contents.stdout | trim == ""
+        fail_msg: >-
+          /u01/app/oraInventory is not empty on {{ inventory_hostname }}.
+        success_msg: >-
+          /u01/app/oraInventory is empty on {{ inventory_hostname }}.
+
+###############################################################################
+# VERIFY SECONDARY NODE IS READY FOR ORACLE SOFTWARE COPY
+###############################################################################
+- name: Validate secondary Grid Home for Oracle remote copy
+  hosts: "{{ node2_name }}"
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Check secondary Grid Home is completely empty
+      ansible.builtin.shell: |
+        if [ ! -d "{{ grid_home }}" ]; then
+          echo "MISSING"
+        elif [ -z "$(find "{{ grid_home }}" -mindepth 1 -print -quit)" ]; then
+          echo "EMPTY"
+        else
+          echo "NOT_EMPTY"
+          find "{{ grid_home }}" -mindepth 1 -maxdepth 2 | head -50
+        fi
+      args:
+        executable: /bin/bash
+      register: secondary_grid_home_check
+      changed_when: false
+
+    - name: Assert secondary Grid Home is ready
+      ansible.builtin.assert:
+        that:
+          - secondary_grid_home_check.stdout_lines[0] == "EMPTY"
+        fail_msg: >-
+          {{ grid_home }} on {{ node2_name }} is not empty.
+          Oracle cannot copy Grid software from {{ node1_name }}.
+        success_msg: >-
+          {{ grid_home }} on {{ node2_name }} is empty and ready
+          for Oracle remote software copy.
+
