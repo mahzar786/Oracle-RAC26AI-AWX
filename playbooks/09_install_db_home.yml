@@ -35,13 +35,19 @@
           - /u01
       changed_when: false
 
-    - name: Verify stage filesystem is mounted
+    - name: Verify stage directory is on a mounted filesystem
       ansible.builtin.command:
         argv:
           - /usr/bin/findmnt
           - -n
+          - -T
           - "{{ stage_dir }}"
+      register: stage_mount_check
       changed_when: false
+
+    - name: Show stage filesystem
+      ansible.builtin.debug:
+        var: stage_mount_check.stdout_lines
 
     - name: Verify Database software image exists
       ansible.builtin.stat:
