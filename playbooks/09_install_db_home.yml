@@ -1,2 +1,427 @@
 ---
-# Placeholder for 09_install_db_home.yml
+###############################################################################
+# PLAY 1: Validate Oracle Database 26ai installation prerequisites
+###############################################################################
+- name: Validate Oracle Database home installation prerequisites
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Validate required Database installation variables
+      ansible.builtin.assert:
+        that:
+          - node1_name is defined
+          - node2_name is defined
+          - grid_home is defined
+          - oracle_base is defined
+          - db_home is defined
+          - stage_dir is defined
+          - db_zip is defined
+        fail_msg: >-
+          One or more required Database installation variables are missing
+          from group_vars/all.yml.
+        success_msg: "Required Database installation variables are defined."
+
+    - name: Verify /u01 is a mounted filesystem
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/findmnt
+          - -n
+          - /u01
+      changed_when: false
+
+    - name: Verify stage filesystem is mounted
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/findmnt
+          - -n
+          - "{{ stage_dir }}"
+      changed_when: false
+
+    - name: Verify Database software image exists
+      ansible.builtin.stat:
+        path: "{{ stage_dir }}/{{ db_zip }}"
+      register: db_zip_stat
+
+    - name: Fail if Database image is missing
+      ansible.builtin.assert:
+        that:
+          - db_zip_stat.stat.exists
+          - db_zip_stat.stat.isreg
+          - db_zip_stat.stat.size > 1000000000
+        fail_msg: >-
+          {{ stage_dir }}/{{ db_zip }} is missing or appears incomplete
+          on {{ inventory_hostname }}.
+        success_msg: "Database image exists on {{ inventory_hostname }}."
+
+    - name: Verify Grid cluster is healthy
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/crsctl"
+          - check
+          - cluster
+          - -all
+      register: cluster_check
+      changed_when: false
+      run_once: true
+
+    - name: Show cluster status
+      ansible.builtin.debug:
+        var: cluster_check.stdout_lines
+      run_once: true
+
+    - name: Verify DATA and FRA ASM diskgroups are mounted
+      become_user: grid
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/asmcmd"
+          - lsdg
+      register: asm_diskgroups
+      changed_when: false
+      run_once: true
+
+    - name: Fail if DATA or FRA diskgroup is unavailable
+      ansible.builtin.assert:
+        that:
+          - "'DATA/' in asm_diskgroups.stdout"
+          - "'FRA/' in asm_diskgroups.stdout"
+        fail_msg: "DATA and FRA ASM diskgroups must be mounted before DB install."
+        success_msg: "DATA and FRA ASM diskgroups are mounted."
+      run_once: true
+
+    - name: Verify Oracle operating-system groups
+      ansible.builtin.shell: |
+        set -e
+        getent group oinstall
+        getent group dba
+        getent group oper
+        getent group backupdba
+        getent group dgdba
+        getent group kmdba
+        getent group racdba
+        id oracle
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+###############################################################################
+# PLAY 2: Prepare Database homes
+#
+# Database image is extracted only on racs1.
+# racs2 Database home must be empty for Oracle remote-node copy.
+###############################################################################
+- name: Prepare Oracle Database homes
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Create Oracle base
+      ansible.builtin.file:
+        path: "{{ oracle_base }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: "0775"
+
+    - name: Create Database home parent
+      ansible.builtin.file:
+        path: "{{ db_home | dirname }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: "0775"
+
+    - name: Create Database home
+      ansible.builtin.file:
+        path: "{{ db_home }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: "0775"
+
+    - name: Check whether primary Database image is already extracted
+      ansible.builtin.stat:
+        path: "{{ db_home }}/runInstaller"
+      register: primary_runinstaller
+      when: inventory_hostname == node1_name
+
+    - name: Extract Database image on primary node
+      become_user: oracle
+      ansible.builtin.unarchive:
+        src: "{{ stage_dir }}/{{ db_zip }}"
+        dest: "{{ db_home }}"
+        remote_src: true
+      when:
+        - inventory_hostname == node1_name
+        - not primary_runinstaller.stat.exists
+
+    - name: Set Database home ownership on primary node
+      ansible.builtin.file:
+        path: "{{ db_home }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        recurse: true
+      when: inventory_hostname == node1_name
+
+    - name: Verify runInstaller exists on primary node
+      ansible.builtin.stat:
+        path: "{{ db_home }}/runInstaller"
+      register: runinstaller_stat
+      when: inventory_hostname == node1_name
+
+    - name: Fail if runInstaller is unavailable on primary node
+      ansible.builtin.assert:
+        that:
+          - runinstaller_stat.stat.exists
+          - runinstaller_stat.stat.isreg
+          - runinstaller_stat.stat.executable
+        fail_msg: "{{ db_home }}/runInstaller is unavailable on {{ node1_name }}."
+        success_msg: "Database image is ready on {{ node1_name }}."
+      when: inventory_hostname == node1_name
+
+    - name: Check secondary Database home is empty
+      ansible.builtin.shell: |
+        if [ ! -d "{{ db_home }}" ]; then
+          echo "EMPTY"
+        elif [ -z "$(find "{{ db_home }}" -mindepth 1 -print -quit)" ]; then
+          echo "EMPTY"
+        else
+          echo "NOT_EMPTY"
+          find "{{ db_home }}" -mindepth 1 -maxdepth 1 | head -20
+        fi
+      args:
+        executable: /bin/bash
+      register: secondary_dbhome_check
+      changed_when: false
+      when: inventory_hostname == node2_name
+
+    - name: Fail if secondary Database home is not empty
+      ansible.builtin.assert:
+        that:
+          - secondary_dbhome_check.stdout_lines[0] == "EMPTY"
+        fail_msg: >-
+          {{ db_home }} on {{ node2_name }} is not empty.
+          Oracle must copy the Database software from {{ node1_name }}.
+        success_msg: >-
+          {{ db_home }} on {{ node2_name }} is empty and ready.
+      when: inventory_hostname == node2_name
+
+###############################################################################
+# PLAY 3: Install Oracle Database 26ai RAC software from racs1
+###############################################################################
+- name: Install Oracle Database 26ai RAC software
+  hosts: "{{ node1_name }}"
+  become: true
+  become_user: oracle
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  environment:
+    ORACLE_BASE: "{{ oracle_base }}"
+    ORACLE_HOME: "{{ db_home }}"
+    PATH: "{{ db_home }}/bin:/usr/bin:/bin"
+
+  tasks:
+    - name: Remove previous Database response and installer logs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/db_install.rsp
+        - /tmp/db_install_stdout.log
+
+    - name: Copy Oracle supplied Database response template
+      ansible.builtin.copy:
+        src: "{{ db_home }}/install/response/db_install.rsp"
+        dest: /tmp/db_install.rsp
+        remote_src: true
+        owner: oracle
+        group: oinstall
+        mode: "0600"
+
+    - name: Configure Database installation response file
+      ansible.builtin.shell: |
+        set -e
+
+        RSP=/tmp/db_install.rsp
+
+        set_value() {
+          key="$1"
+          value="$2"
+
+          if grep -qE "^${key}=" "${RSP}"; then
+            sed -i "s#^${key}=.*#${key}=${value}#" "${RSP}"
+          else
+            printf '%s=%s\n' "${key}" "${value}" >> "${RSP}"
+          fi
+        }
+
+        set_value "oracle.install.option" "INSTALL_DB_SWONLY"
+        set_value "UNIX_GROUP_NAME" "oinstall"
+        set_value "INVENTORY_LOCATION" "/u01/app/oraInventory"
+        set_value "ORACLE_HOME" "{{ db_home }}"
+        set_value "ORACLE_BASE" "{{ oracle_base }}"
+        set_value "oracle.install.db.InstallEdition" "EE"
+        set_value "oracle.install.db.OSDBA_GROUP" "dba"
+        set_value "oracle.install.db.OSOPER_GROUP" "oper"
+        set_value "oracle.install.db.OSBACKUPDBA_GROUP" "backupdba"
+        set_value "oracle.install.db.OSDGDBA_GROUP" "dgdba"
+        set_value "oracle.install.db.OSKMDBA_GROUP" "kmdba"
+        set_value "oracle.install.db.OSRACDBA_GROUP" "racdba"
+        set_value "oracle.install.db.CLUSTER_NODES" "{{ node1_name }},{{ node2_name }}"
+        set_value "oracle.install.db.isRACOneInstall" "false"
+        set_value "oracle.install.db.rootconfig.executeRootScript" "false"
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Show sanitized Database response values
+      ansible.builtin.shell: |
+        grep -E \
+        '^(oracle.install.option|UNIX_GROUP_NAME|INVENTORY_LOCATION|ORACLE_HOME|ORACLE_BASE|oracle.install.db.InstallEdition|oracle.install.db.OS|oracle.install.db.CLUSTER_NODES|oracle.install.db.isRACOneInstall|oracle.install.db.rootconfig.executeRootScript)=' \
+        /tmp/db_install.rsp
+      args:
+        executable: /bin/bash
+      register: sanitized_db_response
+      changed_when: false
+
+    - name: Print sanitized Database response
+      ansible.builtin.debug:
+        var: sanitized_db_response.stdout_lines
+
+    - name: Run Database software-only installation
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        "{{ db_home }}/runInstaller" \
+          -silent \
+          -waitforcompletion \
+          -responseFile /tmp/db_install.rsp \
+          -ignorePrereqFailure \
+          2>&1 | tee /tmp/db_install_stdout.log
+
+        exit ${PIPESTATUS[0]}
+      args:
+        executable: /bin/bash
+      register: db_install
+      changed_when: true
+      failed_when: db_install.rc not in [0, 6]
+
+    - name: Show Database installation output
+      ansible.builtin.debug:
+        var: db_install.stdout_lines
+
+###############################################################################
+# PLAY 4: Run Database-home root.sh sequentially
+###############################################################################
+- name: Run Database-home root scripts
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Verify Database root script exists
+      ansible.builtin.stat:
+        path: "{{ db_home }}/root.sh"
+      register: db_root_script
+
+    - name: Fail if Database root script is missing
+      ansible.builtin.assert:
+        that:
+          - db_root_script.stat.exists
+          - db_root_script.stat.executable
+        fail_msg: "{{ db_home }}/root.sh is missing on {{ inventory_hostname }}."
+
+    - name: Run Database root script
+      ansible.builtin.shell: |
+        set -o pipefail
+        "{{ db_home }}/root.sh" 2>&1 |
+          tee "/tmp/db_root_{{ inventory_hostname }}.log"
+        exit ${PIPESTATUS[0]}
+      args:
+        executable: /bin/bash
+      register: db_root_output
+      changed_when: true
+
+    - name: Show Database root output
+      ansible.builtin.debug:
+        var: db_root_output.stdout_lines
+
+###############################################################################
+# PLAY 5: Validate installed Database home
+###############################################################################
+- name: Validate Oracle Database 26ai home
+  hosts: all
+  become: true
+  become_user: oracle
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  environment:
+    ORACLE_BASE: "{{ oracle_base }}"
+    ORACLE_HOME: "{{ db_home }}"
+    PATH: "{{ db_home }}/bin:/usr/bin:/bin"
+
+  tasks:
+    - name: Verify SQL Plus
+      ansible.builtin.command:
+        argv:
+          - "{{ db_home }}/bin/sqlplus"
+          - -v
+      register: sqlplus_version
+      changed_when: false
+
+    - name: Verify Oracle inventory
+      ansible.builtin.command:
+        argv:
+          - "{{ db_home }}/OPatch/opatch"
+          - lsinventory
+      register: db_inventory
+      changed_when: false
+
+    - name: Show Database home validation
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "{{ sqlplus_version.stdout_lines }}"
+          - "Oracle inventory validation completed."
+
+###############################################################################
+# PLAY 6: Final Database-home installation summary
+###############################################################################
+- name: Database home installation summary
+  hosts: "{{ node1_name }}"
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Print next step
+      ansible.builtin.debug:
+        msg:
+          - "Oracle Database 26ai RAC software installation completed."
+          - "Database home: {{ db_home }}"
+          - "Nodes: {{ node1_name }}, {{ node2_name }}"
+          - "Next AWX job: 10 - Create RAC Database"
