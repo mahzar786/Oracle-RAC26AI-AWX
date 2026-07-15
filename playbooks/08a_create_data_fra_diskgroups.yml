@@ -1,2 +1,176 @@
 ---
-# Placeholder for 08a_create_data_fra_diskgroups.yml
+###############################################################################
+# Create DATA and FRA ASM Disk Groups
+###############################################################################
+- name: Create DATA and FRA ASM diskgroups
+  hosts: "{{ node1_name }}"
+  become: true
+  become_user: grid
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    PATH: "{{ grid_home }}/bin:/usr/bin:/bin"
+
+  tasks:
+    - name: Validate required ASM variables
+      ansible.builtin.assert:
+        that:
+          - grid_home is defined
+          - data_diskgroup is defined
+          - fra_diskgroup is defined
+          - data_disks is defined
+          - fra_disks is defined
+          - data_disks | length > 0
+          - fra_disks | length > 0
+        fail_msg: "Required DATA/FRA ASM variables are missing."
+        success_msg: "Required DATA/FRA ASM variables are defined."
+
+    - name: Check Clusterware on all nodes
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/crsctl"
+          - check
+          - cluster
+          - -all
+      register: cluster_status
+      changed_when: false
+
+    - name: Show cluster status
+      ansible.builtin.debug:
+        var: cluster_status.stdout_lines
+
+    - name: Validate DATA and FRA block devices
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: true
+      loop: "{{ data_disks + fra_disks }}"
+      register: asm_device_stats
+
+    - name: Fail if DATA or FRA device is missing
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isblk
+        fail_msg: "{{ item.item }} is missing or is not a block device."
+        success_msg: "{{ item.item }} is a valid block device."
+      loop: "{{ asm_device_stats.results }}"
+
+    - name: Check ASM device ownership and permissions
+      ansible.builtin.shell: |
+        set -e
+        for disk in {{ (data_disks + fra_disks) | join(' ') }}; do
+          realdev=$(readlink -f "$disk")
+          echo "$disk -> $realdev"
+          stat -c 'Owner=%U Group=%G Mode=%a' "$realdev"
+
+          test "$(stat -c '%U' "$realdev")" = "grid"
+          test "$(stat -c '%G' "$realdev")" = "{{ asmadmin_group }}"
+          test "$(stat -c '%a' "$realdev")" = "660"
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Discover existing ASM diskgroups
+      ansible.builtin.shell: |
+        "{{ grid_home }}/bin/asmcmd" lsdg |
+        awk 'NR > 1 {gsub("/","",$NF); print $NF}'
+      args:
+        executable: /bin/bash
+      register: existing_diskgroups
+      changed_when: false
+
+    - name: Show existing ASM diskgroups
+      ansible.builtin.debug:
+        var: existing_diskgroups.stdout_lines
+
+    - name: Inspect DATA and FRA disk headers
+      ansible.builtin.shell: |
+        "{{ grid_home }}/bin/kfod" \
+          disks=all \
+          status=true \
+          asm_diskstring='/dev/asm/*'
+      args:
+        executable: /bin/bash
+      register: kfod_output
+      changed_when: false
+      failed_when: false
+
+    - name: Show ASM disk discovery
+      ansible.builtin.debug:
+        var: kfod_output.stdout_lines
+
+    - name: Create DATA diskgroup
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        "{{ grid_home }}/bin/asmca" \
+          -silent \
+          -createDiskGroup \
+          -diskGroupName "{{ data_diskgroup }}" \
+          -diskList "{{ data_disks | join(',') }}" \
+          -redundancy EXTERNAL \
+          -au_size 4 \
+          2>&1 | tee /tmp/create_{{ data_diskgroup | lower }}_diskgroup.log
+
+        exit ${PIPESTATUS[0]}
+      args:
+        executable: /bin/bash
+      register: create_data_diskgroup
+      changed_when: true
+      when: data_diskgroup not in existing_diskgroups.stdout_lines
+
+    - name: Show DATA diskgroup creation output
+      ansible.builtin.debug:
+        var: create_data_diskgroup.stdout_lines
+      when: create_data_diskgroup is not skipped
+
+    - name: Create FRA diskgroup
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        "{{ grid_home }}/bin/asmca" \
+          -silent \
+          -createDiskGroup \
+          -diskGroupName "{{ fra_diskgroup }}" \
+          -diskList "{{ fra_disks | join(',') }}" \
+          -redundancy EXTERNAL \
+          -au_size 4 \
+          2>&1 | tee /tmp/create_{{ fra_diskgroup | lower }}_diskgroup.log
+
+        exit ${PIPESTATUS[0]}
+      args:
+        executable: /bin/bash
+      register: create_fra_diskgroup
+      changed_when: true
+      when: fra_diskgroup not in existing_diskgroups.stdout_lines
+
+    - name: Show FRA diskgroup creation output
+      ansible.builtin.debug:
+        var: create_fra_diskgroup.stdout_lines
+      when: create_fra_diskgroup is not skipped
+
+    - name: Verify final ASM diskgroups
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/asmcmd"
+          - lsdg
+      register: final_diskgroups
+      changed_when: false
+
+    - name: Show final ASM diskgroups
+      ansible.builtin.debug:
+        var: final_diskgroups.stdout_lines
+
+    - name: Assert OCR DATA and FRA are mounted
+      ansible.builtin.assert:
+        that:
+          - ocr_diskgroup in final_diskgroups.stdout
+          - data_diskgroup in final_diskgroups.stdout
+          - fra_diskgroup in final_diskgroups.stdout
+        fail_msg: "One or more required ASM diskgroups are not mounted."
+        success_msg: "OCR, DATA and FRA ASM diskgroups are mounted."
