@@ -158,7 +158,7 @@
         state: absent
 
     - name: Create RAC CDB and PDB using DBCA
-      no_log: true
+      no_log: false
       ansible.builtin.shell: |
         set -o pipefail
 
