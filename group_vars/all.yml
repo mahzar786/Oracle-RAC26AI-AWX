@@ -149,3 +149,8 @@ db_type: RAC
 
 system_password: 'RacAttack#2026'
 pdb_admin_password: 'RacAttack#2026'
+
+character_set: AL32UTF8
+national_character_set: AL16UTF16
+db_memory_mb: 4096
+recovery_area_size_mb: 20480
