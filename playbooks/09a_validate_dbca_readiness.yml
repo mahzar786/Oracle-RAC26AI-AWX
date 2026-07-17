@@ -188,11 +188,14 @@
     - name: Verify required ASM diskgroups are mounted
       ansible.builtin.assert:
         that:
-          - "('/' + rac_data_dg + '/') in ('/' + asm_diskgroups.stdout)"
-          - "('/' + rac_fra_dg + '/') in ('/' + asm_diskgroups.stdout)"
+          - "(rac_data_dg + '/') in asm_diskgroups.stdout"
+          - "(rac_fra_dg + '/') in asm_diskgroups.stdout"
         fail_msg: >-
           Required ASM diskgroups {{ rac_data_dg }} and {{ rac_fra_dg }}
           are not both mounted.
+        success_msg: >-
+          Required ASM diskgroups {{ rac_data_dg }} and {{ rac_fra_dg }}
+          are mounted.
       run_once: true
 
     - name: Check existing Clusterware database registration
