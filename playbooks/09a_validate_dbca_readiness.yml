@@ -1,0 +1,263 @@
+---
+# Validate Oracle RAC environment before DBCA CDB/PDB creation.
+# This playbook does not modify the cluster or ASM.
+
+- name: Validate RAC database creation readiness
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    rac_db_name: "{{ db_name | default('TESTCDB') }}"
+    rac_db_unique_name: "{{ db_unique_name | default(db_name | default('TESTCDB')) }}"
+    rac_pdb_name: "{{ pdb_name | default('TESTPDB') }}"
+    rac_data_dg: "{{ data_diskgroup | default('DATA') }}"
+    rac_fra_dg: "{{ fra_diskgroup | default('FRA') }}"
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - grid_home is defined
+          - db_home is defined
+          - oracle_base is defined
+          - grid_home | length > 0
+          - db_home | length > 0
+          - oracle_base | length > 0
+        fail_msg: >-
+          Required variables grid_home, db_home or oracle_base are missing
+          from group_vars/all.yml.
+
+    - name: Verify Grid home utilities
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ grid_home }}/bin/crsctl"
+        - "{{ grid_home }}/bin/srvctl"
+        - "{{ grid_home }}/bin/asmcmd"
+      register: grid_utilities
+
+    - name: Assert Grid home utilities exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.executable
+        fail_msg: "Missing or non-executable Grid utility: {{ item.item }}"
+      loop: "{{ grid_utilities.results }}"
+
+    - name: Verify DBCA binary
+      ansible.builtin.stat:
+        path: "{{ db_home }}/bin/dbca"
+      register: dbca_binary
+
+    - name: Assert DBCA binary exists
+      ansible.builtin.assert:
+        that:
+          - dbca_binary.stat.exists
+          - dbca_binary.stat.executable
+        fail_msg: "{{ db_home }}/bin/dbca does not exist or is not executable."
+
+    - name: Read Oracle user groups
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/id
+          - -nG
+          - oracle
+      register: oracle_groups
+      changed_when: false
+
+    - name: Verify Oracle database owner groups
+      ansible.builtin.assert:
+        that:
+          - "'dba' in oracle_groups.stdout.split()"
+          - "'asmdba' in oracle_groups.stdout.split()"
+          - "'racdba' in oracle_groups.stdout.split()"
+        fail_msg: >-
+          oracle must belong to dba, asmdba and racdba on
+          {{ inventory_hostname }}. Current groups:
+          {{ oracle_groups.stdout }}
+        success_msg: >-
+          Oracle groups are correct on {{ inventory_hostname }}.
+
+    - name: Check for running database PMON
+      ansible.builtin.shell: |
+        pgrep -af "ora_pmon_{{ rac_db_name }}" || true
+      args:
+        executable: /bin/bash
+      register: database_pmon
+      changed_when: false
+
+    - name: Ensure previous database instance is not running
+      ansible.builtin.assert:
+        that:
+          - database_pmon.stdout | trim == ""
+        fail_msg: >-
+          A {{ rac_db_name }} PMON process is running on
+          {{ inventory_hostname }}:
+          {{ database_pmon.stdout }}
+
+- name: Validate Clusterware ASM SCAN and stale database files
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    validation_node: "{{ groups['all'][0] }}"
+    rac_db_name: "{{ db_name | default('TESTCDB') }}"
+    rac_db_unique_name: "{{ db_unique_name | default(db_name | default('TESTCDB')) }}"
+    rac_pdb_name: "{{ pdb_name | default('TESTPDB') }}"
+    rac_data_dg: "{{ data_diskgroup | default('DATA') }}"
+    rac_fra_dg: "{{ fra_diskgroup | default('FRA') }}"
+
+  tasks:
+    - name: Check Clusterware on all nodes
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/crsctl"
+          - check
+          - cluster
+          - -all
+      become_user: grid
+      delegate_to: "{{ validation_node }}"
+      register: cluster_check
+      changed_when: false
+      run_once: true
+
+    - name: Display Clusterware status
+      ansible.builtin.debug:
+        var: cluster_check.stdout_lines
+      run_once: true
+
+    - name: Check SCAN VIP status
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/srvctl"
+          - status
+          - scan
+      become_user: grid
+      delegate_to: "{{ validation_node }}"
+      register: scan_status
+      changed_when: false
+      run_once: true
+
+    - name: Display SCAN VIP status
+      ansible.builtin.debug:
+        var: scan_status.stdout_lines
+      run_once: true
+
+    - name: Check SCAN listener status
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/srvctl"
+          - status
+          - scan_listener
+      become_user: grid
+      delegate_to: "{{ validation_node }}"
+      register: scan_listener_status
+      changed_when: false
+      run_once: true
+
+    - name: Display SCAN listener status
+      ansible.builtin.debug:
+        var: scan_listener_status.stdout_lines
+      run_once: true
+
+    - name: Read mounted ASM diskgroups
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/asmcmd"
+          - lsdg
+      become_user: grid
+      delegate_to: "{{ validation_node }}"
+      register: asm_diskgroups
+      changed_when: false
+      run_once: true
+
+    - name: Display ASM diskgroups
+      ansible.builtin.debug:
+        var: asm_diskgroups.stdout_lines
+      run_once: true
+
+    - name: Verify required ASM diskgroups are mounted
+      ansible.builtin.assert:
+        that:
+          - "('/' + rac_data_dg + '/') in ('/' + asm_diskgroups.stdout)"
+          - "('/' + rac_fra_dg + '/') in ('/' + asm_diskgroups.stdout)"
+        fail_msg: >-
+          Required ASM diskgroups {{ rac_data_dg }} and {{ rac_fra_dg }}
+          are not both mounted.
+      run_once: true
+
+    - name: Check existing Clusterware database registration
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/srvctl"
+          - config
+          - database
+          - -d
+          - "{{ rac_db_unique_name }}"
+      become_user: oracle
+      delegate_to: "{{ validation_node }}"
+      register: database_registration
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Ensure database is not registered
+      ansible.builtin.assert:
+        that:
+          - database_registration.rc != 0
+        fail_msg: >-
+          Database {{ rac_db_unique_name }} is already registered in
+          Clusterware. Do not rerun DBCA until it has been reviewed or
+          deleted using the supported database deletion procedure.
+      run_once: true
+
+    - name: Check stale database directory in DATA
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/asmcmd"
+          - ls
+          - "+{{ rac_data_dg }}/{{ rac_db_unique_name }}"
+      become_user: grid
+      delegate_to: "{{ validation_node }}"
+      register: stale_data_directory
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Check stale database directory in FRA
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/asmcmd"
+          - ls
+          - "+{{ rac_fra_dg }}/{{ rac_db_unique_name }}"
+      become_user: grid
+      delegate_to: "{{ validation_node }}"
+      register: stale_fra_directory
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Final DBCA readiness decision
+      ansible.builtin.assert:
+        that:
+          - stale_data_directory.rc != 0
+          - stale_fra_directory.rc != 0
+        fail_msg: >-
+          Stale DBCA files exist under
+          +{{ rac_data_dg }}/{{ rac_db_unique_name }} or
+          +{{ rac_fra_dg }}/{{ rac_db_unique_name }}.
+          Run playbooks/09b_cleanup_failed_dbca.yml and then rerun this
+          validation playbook.
+        success_msg: >-
+          Environment is ready for DBCA creation of CDB
+          {{ rac_db_unique_name }} and PDB {{ rac_pdb_name }}.
+      run_once: true

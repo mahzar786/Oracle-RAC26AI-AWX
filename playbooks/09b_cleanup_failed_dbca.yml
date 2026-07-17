@@ -1,0 +1,262 @@
+---
+# Guarded cleanup for an incomplete or failed DBCA execution.
+#
+# Required extra variable:
+# cleanup_confirmation=DELETE_FAILED_TESTCDB
+#
+# This playbook preserves the DATA and FRA diskgroups themselves.
+
+- name: Validate failed DBCA cleanup safety on every node
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    rac_db_name: "{{ db_name | default('TESTCDB') }}"
+    rac_db_unique_name: "{{ db_unique_name | default(db_name | default('TESTCDB')) }}"
+    required_confirmation: "DELETE_FAILED_{{ db_unique_name | default(db_name | default('TESTCDB')) }}"
+
+  tasks:
+    - name: Require explicit cleanup confirmation
+      ansible.builtin.assert:
+        that:
+          - cleanup_confirmation is defined
+          - cleanup_confirmation == required_confirmation
+        fail_msg: >-
+          Cleanup refused. Supply this exact extra variable:
+          cleanup_confirmation={{ required_confirmation }}
+
+    - name: Check for running database PMON
+      ansible.builtin.shell: |
+        pgrep -af "ora_pmon_{{ rac_db_name }}" || true
+      args:
+        executable: /bin/bash
+      register: database_pmon
+      changed_when: false
+
+    - name: Refuse cleanup when database instance is running
+      ansible.builtin.assert:
+        that:
+          - database_pmon.stdout | trim == ""
+        fail_msg: >-
+          Cleanup aborted because {{ rac_db_name }} is running on
+          {{ inventory_hostname }}:
+          {{ database_pmon.stdout }}
+
+- name: Remove failed DBCA ASM files
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    cleanup_node: "{{ groups['all'][0] }}"
+    rac_db_name: "{{ db_name | default('TESTCDB') }}"
+    rac_db_unique_name: "{{ db_unique_name | default(db_name | default('TESTCDB')) }}"
+    rac_data_dg: "{{ data_diskgroup | default('DATA') }}"
+    rac_fra_dg: "{{ fra_diskgroup | default('FRA') }}"
+
+  tasks:
+    - name: Check database registration
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/srvctl"
+          - config
+          - database
+          - -d
+          - "{{ rac_db_unique_name }}"
+      become_user: oracle
+      delegate_to: "{{ cleanup_node }}"
+      register: database_registration
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Refuse cleanup of registered database
+      ansible.builtin.assert:
+        that:
+          - database_registration.rc != 0
+        fail_msg: >-
+          Cleanup aborted because {{ rac_db_unique_name }} is registered
+          in Clusterware. Use DBCA deleteDatabase or review the registered
+          database before deleting ASM files.
+      run_once: true
+
+    - name: Show failed DATA database files before removal
+      ansible.builtin.shell: |
+        "{{ grid_home }}/bin/asmcmd" find \
+          "+{{ rac_data_dg }}/{{ rac_db_unique_name }}" "*" 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      become_user: grid
+      delegate_to: "{{ cleanup_node }}"
+      register: data_files_before
+      changed_when: false
+      run_once: true
+
+    - name: Show failed FRA database files before removal
+      ansible.builtin.shell: |
+        "{{ grid_home }}/bin/asmcmd" find \
+          "+{{ rac_fra_dg }}/{{ rac_db_unique_name }}" "*" 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      become_user: grid
+      delegate_to: "{{ cleanup_node }}"
+      register: fra_files_before
+      changed_when: false
+      run_once: true
+
+    - name: Display failed ASM files
+      ansible.builtin.debug:
+        msg:
+          - "DATA files:"
+          - "{{ data_files_before.stdout_lines }}"
+          - "FRA files:"
+          - "{{ fra_files_before.stdout_lines }}"
+      run_once: true
+
+    - name: Remove failed database directory from DATA
+      ansible.builtin.shell: |
+        if "{{ grid_home }}/bin/asmcmd" ls \
+          "+{{ rac_data_dg }}/{{ rac_db_unique_name }}" >/dev/null 2>&1
+        then
+          "{{ grid_home }}/bin/asmcmd" rm -rf \
+            "+{{ rac_data_dg }}/{{ rac_db_unique_name }}"
+          echo "REMOVED"
+        else
+          echo "ALREADY_ABSENT"
+        fi
+      args:
+        executable: /bin/bash
+      become_user: grid
+      delegate_to: "{{ cleanup_node }}"
+      register: data_cleanup
+      changed_when: "'REMOVED' in data_cleanup.stdout"
+      run_once: true
+
+    - name: Remove failed database directory from FRA
+      ansible.builtin.shell: |
+        if "{{ grid_home }}/bin/asmcmd" ls \
+          "+{{ rac_fra_dg }}/{{ rac_db_unique_name }}" >/dev/null 2>&1
+        then
+          "{{ grid_home }}/bin/asmcmd" rm -rf \
+            "+{{ rac_fra_dg }}/{{ rac_db_unique_name }}"
+          echo "REMOVED"
+        else
+          echo "ALREADY_ABSENT"
+        fi
+      args:
+        executable: /bin/bash
+      become_user: grid
+      delegate_to: "{{ cleanup_node }}"
+      register: fra_cleanup
+      changed_when: "'REMOVED' in fra_cleanup.stdout"
+      run_once: true
+
+- name: Remove failed DBCA local files from database nodes
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: 1
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    rac_db_name: "{{ db_name | default('TESTCDB') }}"
+    rac_db_unique_name: "{{ db_unique_name | default(db_name | default('TESTCDB')) }}"
+
+  tasks:
+    - name: Find failed database files in DB home
+      ansible.builtin.find:
+        paths: "{{ db_home }}/dbs"
+        file_type: file
+        patterns:
+          - "init{{ rac_db_name }}*.ora"
+          - "spfile{{ rac_db_name }}*.ora"
+          - "orapw{{ rac_db_name }}*"
+          - "hc_{{ rac_db_name }}*.dat"
+      register: failed_db_home_files
+
+    - name: Remove failed database files from DB home
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ failed_db_home_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Remove failed database entries from oratab
+      ansible.builtin.lineinfile:
+        path: /etc/oratab
+        regexp: "^{{ rac_db_name }}[0-9]*:"
+        state: absent
+      failed_when: false
+
+    - name: Ensure clean audit directory exists
+      ansible.builtin.file:
+        path: "{{ oracle_base }}/admin/{{ rac_db_unique_name }}/adump"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: "0750"
+
+- name: Verify failed DBCA cleanup
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    cleanup_node: "{{ groups['all'][0] }}"
+    rac_db_unique_name: "{{ db_unique_name | default(db_name | default('TESTCDB')) }}"
+    rac_data_dg: "{{ data_diskgroup | default('DATA') }}"
+    rac_fra_dg: "{{ fra_diskgroup | default('FRA') }}"
+
+  tasks:
+    - name: Verify DATA database directory is absent
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/asmcmd"
+          - ls
+          - "+{{ rac_data_dg }}/{{ rac_db_unique_name }}"
+      become_user: grid
+      delegate_to: "{{ cleanup_node }}"
+      register: final_data_check
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Verify FRA database directory is absent
+      ansible.builtin.command:
+        argv:
+          - "{{ grid_home }}/bin/asmcmd"
+          - ls
+          - "+{{ rac_fra_dg }}/{{ rac_db_unique_name }}"
+      become_user: grid
+      delegate_to: "{{ cleanup_node }}"
+      register: final_fra_check
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Assert failed ASM database directories are removed
+      ansible.builtin.assert:
+        that:
+          - final_data_check.rc != 0
+          - final_fra_check.rc != 0
+        fail_msg: >-
+          Cleanup is incomplete. Review ASM directories manually.
+        success_msg: >-
+          Failed DBCA artifacts have been removed.
+          DATA and FRA diskgroups were preserved.
+          Rerun 09a_validate_dbca_readiness.yml.
+      run_once: true
