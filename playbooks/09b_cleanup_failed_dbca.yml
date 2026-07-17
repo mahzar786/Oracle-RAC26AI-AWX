@@ -32,7 +32,7 @@
 
     - name: Check for running database PMON
       ansible.builtin.shell: |
-        pgrep -af "ora_pmon_{{ rac_db_name }}" || true
+        pgrep -af "[o]ra_pmon_{{ rac_db_name }}" || true
       args:
         executable: /bin/bash
       register: database_pmon
