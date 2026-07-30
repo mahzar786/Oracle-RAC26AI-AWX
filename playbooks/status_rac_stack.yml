@@ -1,0 +1,73 @@
+---
+- name: Check Oracle RAC stack status
+  hosts: rac_cluster
+  gather_facts: false
+  become: true
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+    db_name: TESTCDB
+
+  tasks:
+    - name: Check Clusterware status
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display Clusterware status
+      ansible.builtin.debug:
+        var: crs_status.stdout_lines
+
+    - name: Check local ASM status
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status asm -node {{ inventory_hostname }}"
+      register: asm_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display ASM status
+      ansible.builtin.debug:
+        var: asm_status.stdout_lines
+
+    - name: Check local listener status
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status listener -node {{ inventory_hostname }}"
+      register: listener_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display listener status
+      ansible.builtin.debug:
+        var: listener_status.stdout_lines
+
+    - name: Check RAC database status
+      become_user: oracle
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status database -d {{ db_name }}"
+      register: database_status
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Display RAC database status
+      ansible.builtin.debug:
+        var: database_status.stdout_lines
+      run_once: true
+
+    - name: Show cluster resource table
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl stat res -t"
+      register: cluster_resources
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Display cluster resources
+      ansible.builtin.debug:
+        var: cluster_resources.stdout_lines
+      run_once: true

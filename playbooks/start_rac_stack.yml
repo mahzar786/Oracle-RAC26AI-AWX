@@ -1,0 +1,119 @@
+---
+- name: Start Oracle Clusterware on each RAC node
+  hosts: rac_cluster
+  gather_facts: false
+  become: true
+  serial: 1
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+
+  tasks:
+    - name: Check current Clusterware status
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_check_before
+      changed_when: false
+      failed_when: false
+
+    - name: Display current Clusterware status
+      ansible.builtin.debug:
+        var: crs_check_before.stdout_lines
+
+    - name: Start Clusterware when it is not fully running
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl start crs"
+      register: crs_start
+      when: crs_check_before.rc != 0
+      changed_when: crs_start.rc == 0
+      failed_when:
+        - crs_start.rc != 0
+        - "'already running' not in crs_start.stdout | lower"
+        - "'already running' not in crs_start.stderr | lower"
+
+    - name: Wait for Clusterware initialization
+      ansible.builtin.pause:
+        seconds: 30
+      when: crs_check_before.rc != 0
+
+    - name: Verify Clusterware status
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_check_after
+      changed_when: false
+      retries: 10
+      delay: 15
+      until: crs_check_after.rc == 0
+
+    - name: Display Clusterware status
+      ansible.builtin.debug:
+        var: crs_check_after.stdout_lines
+
+- name: Start Oracle RAC database resources
+  hosts: racs1
+  gather_facts: false
+  become: true
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+    db_name: TESTCDB
+
+  tasks:
+    - name: Start ASM resources
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl start asm"
+      register: asm_start
+      changed_when: asm_start.rc == 0
+      failed_when:
+        - asm_start.rc != 0
+        - "'already running' not in asm_start.stdout | lower"
+        - "'already running' not in asm_start.stderr | lower"
+
+    - name: Start listener resources
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl start listener"
+      register: listener_start
+      changed_when: listener_start.rc == 0
+      failed_when:
+        - listener_start.rc != 0
+        - "'already running' not in listener_start.stdout | lower"
+        - "'already running' not in listener_start.stderr | lower"
+
+    - name: Start RAC database
+      become_user: oracle
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl start database -d {{ db_name }}"
+      register: database_start
+      changed_when: database_start.rc == 0
+      failed_when:
+        - database_start.rc != 0
+        - "'already running' not in database_start.stdout | lower"
+        - "'already running' not in database_start.stderr | lower"
+
+    - name: Wait for database startup
+      ansible.builtin.pause:
+        seconds: 20
+
+    - name: Check RAC database status
+      become_user: oracle
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status database -d {{ db_name }}"
+      register: database_status
+      changed_when: false
+
+    - name: Display RAC database status
+      ansible.builtin.debug:
+        var: database_status.stdout_lines
+
+    - name: Display cluster resource table
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl stat res -t"
+      register: cluster_resources
+      changed_when: false
+
+    - name: Show cluster resources
+      ansible.builtin.debug:
+        var: cluster_resources.stdout_lines

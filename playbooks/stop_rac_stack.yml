@@ -1,0 +1,90 @@
+---
+- name: Stop Oracle RAC database resources
+  hosts: racs1
+  gather_facts: false
+  become: true
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+    db_name: TESTCDB
+
+  tasks:
+    - name: Check database status before shutdown
+      become_user: oracle
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status database -d {{ db_name }}"
+      register: database_status_before
+      changed_when: false
+      failed_when: false
+
+    - name: Display database status before shutdown
+      ansible.builtin.debug:
+        var: database_status_before.stdout_lines
+
+    - name: Stop RAC database gracefully
+      become_user: oracle
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl stop database -d {{ db_name }} -stopoption immediate"
+      register: database_stop
+      changed_when: database_stop.rc == 0
+      failed_when:
+        - database_stop.rc != 0
+        - "'not running' not in database_stop.stdout | lower"
+        - "'not running' not in database_stop.stderr | lower"
+
+    - name: Verify database is stopped
+      become_user: oracle
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status database -d {{ db_name }}"
+      register: database_status_after
+      changed_when: false
+      failed_when: false
+
+    - name: Display database status after shutdown
+      ansible.builtin.debug:
+        var: database_status_after.stdout_lines
+
+- name: Stop Oracle Clusterware on each RAC node
+  hosts: rac_cluster
+  gather_facts: false
+  become: true
+  serial: 1
+  order: reverse_inventory
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+
+  tasks:
+    - name: Check Clusterware status
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_check
+      changed_when: false
+      failed_when: false
+
+    - name: Stop Clusterware gracefully
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl stop crs"
+      register: crs_stop
+      when: crs_check.rc == 0
+      changed_when: crs_stop.rc == 0
+      failed_when:
+        - crs_stop.rc != 0
+        - "'already stopped' not in crs_stop.stdout | lower"
+        - "'already stopped' not in crs_stop.stderr | lower"
+
+    - name: Wait after Clusterware shutdown
+      ansible.builtin.pause:
+        seconds: 15
+      when: crs_check.rc == 0
+
+    - name: Verify Clusterware is stopped
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_status_after
+      changed_when: false
+      failed_when: false
+
+    - name: Display Clusterware status after shutdown
+      ansible.builtin.debug:
+        var: crs_status_after.stdout_lines
