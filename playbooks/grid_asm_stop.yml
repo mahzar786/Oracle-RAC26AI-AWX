@@ -1,0 +1,85 @@
+---
+- name: Stop Oracle Grid Infrastructure and ASM
+  hosts: rac_cluster
+  gather_facts: false
+  become: true
+  serial: 1
+  order: reverse_inventory
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+
+  tasks:
+    - name: Display target node
+      ansible.builtin.debug:
+        msg: "Stopping Grid Infrastructure and ASM on {{ inventory_hostname }}"
+
+    - name: Check Clusterware status before shutdown
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_before
+      changed_when: false
+      failed_when: false
+
+    - name: Display Clusterware status before shutdown
+      ansible.builtin.debug:
+        var: crs_before.stdout_lines
+
+    - name: Check ASM status before shutdown
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status asm -node {{ inventory_hostname }}"
+      register: asm_before
+      changed_when: false
+      failed_when: false
+      when: crs_before.rc == 0
+
+    - name: Display ASM status before shutdown
+      ansible.builtin.debug:
+        var: asm_before.stdout_lines
+      when:
+        - crs_before.rc == 0
+        - asm_before.stdout_lines is defined
+
+    - name: Stop Clusterware gracefully
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl stop crs"
+      register: crs_stop
+      when: crs_before.rc == 0
+      changed_when: crs_stop.rc == 0
+      failed_when:
+        - crs_stop.rc != 0
+        - "'already stopped' not in crs_stop.stdout | lower"
+        - "'already stopped' not in crs_stop.stderr | lower"
+
+    - name: Display Clusterware shutdown output
+      ansible.builtin.debug:
+        var: crs_stop.stdout_lines
+      when: crs_stop is not skipped
+
+    - name: Wait after Clusterware shutdown
+      ansible.builtin.pause:
+        seconds: 15
+      when: crs_before.rc == 0
+
+    - name: Verify Clusterware is stopped
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_after
+      changed_when: false
+      failed_when: false
+
+    - name: Display final Clusterware status
+      ansible.builtin.debug:
+        msg:
+          - "Node: {{ inventory_hostname }}"
+          - "Clusterware return code: {{ crs_after.rc }}"
+          - "{{ crs_after.stdout_lines | default([]) }}"
+          - "{{ crs_after.stderr_lines | default([]) }}"
+
+    - name: Confirm Clusterware is stopped
+      ansible.builtin.assert:
+        that:
+          - crs_after.rc != 0
+        success_msg: "Grid Infrastructure and ASM are stopped on {{ inventory_hostname }}"
+        fail_msg: "Clusterware still appears to be running on {{ inventory_hostname }}"

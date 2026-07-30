@@ -1,0 +1,87 @@
+---
+- name: Check Oracle Grid Infrastructure and ASM status
+  hosts: rac_cluster
+  gather_facts: false
+  become: true
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+
+  tasks:
+    - name: Display target node
+      ansible.builtin.debug:
+        msg: "Checking Grid Infrastructure and ASM on {{ inventory_hostname }}"
+
+    - name: Check local Clusterware status
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display local Clusterware status
+      ansible.builtin.debug:
+        var: crs_status.stdout_lines
+
+    - name: Display Clusterware errors
+      ansible.builtin.debug:
+        var: crs_status.stderr_lines
+      when:
+        - crs_status.stderr_lines is defined
+        - crs_status.stderr_lines | length > 0
+
+    - name: Check ASM status on local node
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status asm -node {{ inventory_hostname }}"
+      register: asm_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display ASM status
+      ansible.builtin.debug:
+        var: asm_status.stdout_lines
+
+    - name: Display ASM errors
+      ansible.builtin.debug:
+        var: asm_status.stderr_lines
+      when:
+        - asm_status.stderr_lines is defined
+        - asm_status.stderr_lines | length > 0
+
+    - name: Check local ASM resource
+      become_user: grid
+      ansible.builtin.shell: |
+        set -o pipefail
+        {{ grid_home }}/bin/crsctl stat res -t | \
+        egrep 'ora.asm|ora.DATA.dg|ora.FRA.dg|ora.OCR.dg' || true
+      args:
+        executable: /bin/bash
+      register: asm_resources
+      changed_when: false
+      failed_when: false
+
+    - name: Display ASM and diskgroup resources
+      ansible.builtin.debug:
+        var: asm_resources.stdout_lines
+
+- name: Display complete cluster resource status
+  hosts: racs1
+  gather_facts: false
+  become: true
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+
+  tasks:
+    - name: Check complete cluster resource table
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl stat res -t"
+      register: cluster_resources
+      changed_when: false
+      failed_when: false
+
+    - name: Display complete cluster resource table
+      ansible.builtin.debug:
+        var: cluster_resources.stdout_lines

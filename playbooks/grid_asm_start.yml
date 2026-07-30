@@ -1,0 +1,127 @@
+---
+- name: Start Oracle Grid Infrastructure and ASM
+  hosts: rac_cluster
+  gather_facts: false
+  become: true
+  serial: 1
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+
+  tasks:
+    - name: Display target node
+      ansible.builtin.debug:
+        msg: "Starting Grid Infrastructure and ASM on {{ inventory_hostname }}"
+
+    - name: Verify crsctl exists
+      ansible.builtin.stat:
+        path: "{{ grid_home }}/bin/crsctl"
+      register: crsctl_file
+
+    - name: Verify srvctl exists
+      ansible.builtin.stat:
+        path: "{{ grid_home }}/bin/srvctl"
+      register: srvctl_file
+
+    - name: Assert Grid utilities exist
+      ansible.builtin.assert:
+        that:
+          - crsctl_file.stat.exists
+          - crsctl_file.stat.executable
+          - srvctl_file.stat.exists
+          - srvctl_file.stat.executable
+        fail_msg: "Grid utilities are missing or non-executable under {{ grid_home }}"
+
+    - name: Check Clusterware status before startup
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_before
+      changed_when: false
+      failed_when: false
+
+    - name: Display Clusterware status before startup
+      ansible.builtin.debug:
+        var: crs_before.stdout_lines
+
+    - name: Start Clusterware
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl start crs"
+      register: crs_start
+      when: crs_before.rc != 0
+      changed_when: crs_start.rc == 0
+      failed_when:
+        - crs_start.rc != 0
+        - "'already running' not in crs_start.stdout | lower"
+        - "'already running' not in crs_start.stderr | lower"
+
+    - name: Display Clusterware startup output
+      ansible.builtin.debug:
+        var: crs_start.stdout_lines
+      when: crs_start is not skipped
+
+    - name: Wait until Clusterware is running
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl check crs"
+      register: crs_after
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: crs_after.rc == 0
+
+    - name: Display Clusterware status after startup
+      ansible.builtin.debug:
+        var: crs_after.stdout_lines
+
+    - name: Check ASM status after Clusterware startup
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status asm -node {{ inventory_hostname }}"
+      register: asm_after
+      changed_when: false
+      failed_when: false
+
+    - name: Start ASM if it did not start automatically
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl start asm -node {{ inventory_hostname }}"
+      register: asm_start
+      when: asm_after.rc != 0
+      changed_when: asm_start.rc == 0
+      failed_when:
+        - asm_start.rc != 0
+        - "'already running' not in asm_start.stdout | lower"
+        - "'already running' not in asm_start.stderr | lower"
+
+    - name: Wait for ASM to become available
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/srvctl status asm -node {{ inventory_hostname }}"
+      register: asm_final
+      changed_when: false
+      retries: 10
+      delay: 10
+      until: asm_final.rc == 0
+
+    - name: Display final ASM status
+      ansible.builtin.debug:
+        var: asm_final.stdout_lines
+
+- name: Display final Grid and ASM cluster status
+  hosts: racs1
+  gather_facts: false
+  become: true
+
+  vars:
+    grid_home: /u01/app/26ai/grid
+
+  tasks:
+    - name: Display cluster resources
+      become_user: grid
+      ansible.builtin.command:
+        cmd: "{{ grid_home }}/bin/crsctl stat res -t"
+      register: cluster_resources
+      changed_when: false
+
+    - name: Show cluster resources
+      ansible.builtin.debug:
+        var: cluster_resources.stdout_lines
